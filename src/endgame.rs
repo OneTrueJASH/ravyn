@@ -18,7 +18,7 @@
 //! For the absolute last move (opponent has 0 tiles), it's even simpler:
 //! just pick the highest-scoring play.
 
-use crate::board::{Board, Direction};
+use crate::board::Board;
 use crate::dictionary::Dictionary;
 use crate::logging::log;
 use crate::solver::{Move, Solver};
@@ -28,9 +28,6 @@ use crate::tile::{Rack, Tile};
 #[derive(Debug, Clone)]
 pub struct PvMove {
     pub word: String,
-    pub row: usize,
-    pub col: usize,
-    pub direction: Direction,
     pub score: u32,
     pub player: usize, // 0 = us, 1 = opponent
 }
@@ -114,9 +111,6 @@ impl<'a> EndgameSolver<'a> {
                 // Last move — no opponent response. Pure score maximization.
                 let pv = vec![PvMove {
                     word: mv.word.clone(),
-                    row: mv.row,
-                    col: mv.col,
-                    direction: mv.direction,
                     score: mv.score,
                     player: 0,
                 }];
@@ -157,18 +151,12 @@ impl<'a> EndgameSolver<'a> {
 
             let mut pv = vec![PvMove {
                 word: mv.word.clone(),
-                row: mv.row,
-                col: mv.col,
-                direction: mv.direction,
                 score: mv.score,
                 player: 0,
             }];
             if let Some(opp_mv) = best_opp {
                 pv.push(PvMove {
                     word: opp_mv.word.clone(),
-                    row: opp_mv.row,
-                    col: opp_mv.col,
-                    direction: opp_mv.direction,
                     score: opp_mv.score,
                     player: 1,
                 });

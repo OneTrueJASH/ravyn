@@ -1,3 +1,10 @@
+//! Tile representation, letter point values (Crossplay scoring), and 7-slot rack.
+//!
+//! Crossplay uses different point values than standard Scrabble.
+
+/// Number of tile slots in a player's rack.
+pub(crate) const RACK_SIZE: usize = 7;
+
 /// Represents a single tile
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tile {
@@ -47,12 +54,12 @@ pub fn letter_value(letter: char) -> u32 {
 /// Player's rack of tiles (7 slots, some may be empty)
 #[derive(Debug, Clone)]
 pub struct Rack {
-    pub slots: [Option<Tile>; 7],
+    pub slots: [Option<Tile>; RACK_SIZE],
 }
 
 impl Rack {
     pub fn new() -> Self {
-        Rack { slots: [None; 7] }
+        Rack { slots: [None; RACK_SIZE] }
     }
 
     /// Add a tile to the first empty slot
@@ -67,7 +74,7 @@ impl Rack {
 
     /// Clear a slot by setting it to None
     pub fn clear_slot(&mut self, index: usize) {
-        if index < 7 {
+        if index < RACK_SIZE {
             self.slots[index] = None;
         }
     }

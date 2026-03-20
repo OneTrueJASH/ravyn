@@ -1,4 +1,11 @@
+//! 15x15 Crossplay game board with cells, premium squares, and direction types.
+//!
+//! Provides the [`Board`] struct, anchor detection, and tile placement logic.
+
 use crate::tile::Tile;
+
+/// Side length of the square game board.
+pub(crate) const BOARD_SIZE: usize = 15;
 
 /// Premium square types on the Crossplay board
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,14 +85,14 @@ impl Cell {
 /// The 15x15 Crossplay game board
 #[derive(Debug, Clone)]
 pub struct Board {
-    pub cells: [[Cell; 15]; 15],
+    pub cells: [[Cell; BOARD_SIZE]; BOARD_SIZE],
 }
 
 impl Board {
     /// Create a new board with Crossplay premium square layout
     pub fn new() -> Self {
         // Initialize all cells as Normal
-        let mut cells: [[Cell; 15]; 15] =
+        let mut cells: [[Cell; BOARD_SIZE]; BOARD_SIZE] =
             std::array::from_fn(|_| std::array::from_fn(|_| Cell::new(Premium::Normal)));
 
         // Set up premium squares based on actual NYT Crossplay layout
@@ -228,7 +235,7 @@ impl Board {
 
     /// Check if a position is valid
     pub fn is_valid_position(row: i32, col: i32) -> bool {
-        (0..15).contains(&row) && (0..15).contains(&col)
+        (0..BOARD_SIZE as i32).contains(&row) && (0..BOARD_SIZE as i32).contains(&col)
     }
 
     /// Check if a position is empty
@@ -253,8 +260,8 @@ impl Board {
             return anchors;
         }
 
-        for row in 0..15 {
-            for col in 0..15 {
+        for row in 0..BOARD_SIZE {
+            for col in 0..BOARD_SIZE {
                 if self.is_empty(row, col) && self.has_adjacent_tile(row, col) {
                     anchors.push((row, col));
                 }
@@ -273,38 +280,13 @@ impl Board {
         ];
 
         for (r, c) in checks {
-            if r < 15 && c < 15 && !self.is_empty(r, c) {
+            if r < BOARD_SIZE && c < BOARD_SIZE && !self.is_empty(r, c) {
                 return true;
             }
         }
         false
     }
 
-    /// Count open (unoccupied) premium squares
-    /// Returns (3W, 2W, 3L, 2L) counts
-    pub fn count_open_premiums(&self) -> (usize, usize, usize, usize) {
-        let mut open_3w = 0;
-        let mut open_2w = 0;
-        let mut open_3l = 0;
-        let mut open_2l = 0;
-
-        for row in &self.cells {
-            for cell in row {
-                if cell.tile.is_some() {
-                    continue; // Occupied, not open
-                }
-                match cell.premium {
-                    Premium::TripleWord => open_3w += 1,
-                    Premium::DoubleWord => open_2w += 1,
-                    Premium::TripleLetter => open_3l += 1,
-                    Premium::DoubleLetter => open_2l += 1,
-                    Premium::Center | Premium::Normal => {}
-                }
-            }
-        }
-
-        (open_3w, open_2w, open_3l, open_2l)
-    }
 }
 
 impl Default for Board {

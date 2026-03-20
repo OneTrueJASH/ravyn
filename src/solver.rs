@@ -1,7 +1,15 @@
-use crate::board::{Board, Direction};
+//! Move generation engine using anchor-based search with cross-checks.
+//!
+//! Generates all legal moves for a given rack and board position,
+//! scoring each move and evaluating leave quality for equity ranking.
+
+use crate::board::{Board, Direction, BOARD_SIZE};
 use crate::dictionary::Dictionary;
-use crate::tile::{Rack, Tile};
+use crate::tile::{Rack, Tile, RACK_SIZE};
 use std::collections::HashSet;
+
+/// Bonus points awarded when a player uses all tiles from their rack in a single turn.
+pub(crate) const BINGO_BONUS: u32 = 40;
 
 /// A potential move that can be played
 #[derive(Debug, Clone)]
@@ -17,21 +25,32 @@ pub struct Move {
     pub equity: f32,                           // Strategic value (score + leave value)
 }
 
+/// Parameters for constructing a Move from external data (e.g., RefEngine results)
+pub struct ExternalMoveData<'a> {
+    pub word: &'a str,
+    pub row: usize,
+    pub col: usize,
+    pub direction: Direction,
+    pub score: u32,
+    pub equity: f32,
+}
+
 impl Move {
     /// Construct a Move from external data (e.g., RefEngine results)
     ///
     /// The word uses lowercase letters to indicate blanks (e.g., "SNiPER" = blank as I)
     /// Returns None if the move can't be reconstructed with the given rack
     pub fn from_external(
-        word: &str,
-        row: usize,
-        col: usize,
-        direction: Direction,
-        score: u32,
-        equity: f32,
+        data: &ExternalMoveData,
         board: &Board,
         rack: &Rack,
     ) -> Option<Self> {
+        let word = data.word;
+        let row = data.row;
+        let col = data.col;
+        let direction = data.direction;
+        let score = data.score;
+        let equity = data.equity;
         let (dr, dc) = direction.delta();
         let mut tiles_used = Vec::new();
         let mut rack_remaining: Vec<Tile> = rack.tiles().to_vec();
@@ -40,7 +59,7 @@ impl Move {
             let r = row as i32 + dr * i as i32;
             let c = col as i32 + dc * i as i32;
 
-            if r < 0 || r >= 15 || c < 0 || c >= 15 {
+            if !(0..BOARD_SIZE as i32).contains(&r) || !(0..BOARD_SIZE as i32).contains(&c) {
                 return None; // Out of bounds
             }
 
@@ -88,7 +107,7 @@ impl Move {
             }
         }
 
-        let is_bingo = tiles_used.len() == 7;
+        let is_bingo = tiles_used.len() == RACK_SIZE;
 
         Some(Move {
             word: word.to_uppercase(), // Normalize to uppercase for display
@@ -208,7 +227,7 @@ pub struct SolverConfig {
 impl Default for SolverConfig {
     fn default() -> Self {
         SolverConfig {
-            bingo_bonus: 40, // Crossplay uses 40-point bingo bonus
+            bingo_bonus: BINGO_BONUS, // Crossplay uses 40-point bingo bonus
         }
     }
 }
@@ -350,7 +369,7 @@ impl<'a> Solver<'a> {
         }
 
         // Limit by rack size
-        limit.min(7)
+        limit.min(RACK_SIZE)
     }
 
     fn get_cross_checks(&self, row: usize, col: usize, cross_dir: Direction) -> HashSet<char> {
@@ -420,7 +439,7 @@ impl<'a> Solver<'a> {
         if !Board::is_valid_position(row as i32, col as i32) {
             if current_word.len() >= 2 && self.dictionary.is_valid(&current_word)
                 && !placed_tiles.is_empty() {
-                    self.record_move(row, col, dir, &current_word, &placed_tiles, &available_tiles, moves);
+                    self.record_move(dir, &current_word, &placed_tiles, &available_tiles, moves);
                 }
             return;
         }
@@ -462,7 +481,7 @@ impl<'a> Solver<'a> {
                 });
 
                 if connects {
-                    self.record_move(row, col, dir, &current_word, &placed_tiles, &available_tiles, moves);
+                    self.record_move(dir, &current_word, &placed_tiles, &available_tiles, moves);
                 }
             }
 
@@ -528,8 +547,6 @@ impl<'a> Solver<'a> {
 
     fn record_move(
         &self,
-        _end_row: usize,
-        _end_col: usize,
         dir: Direction,
         word: &str,
         placed_tiles: &[(usize, usize, Tile)],
@@ -564,7 +581,7 @@ impl<'a> Solver<'a> {
         // Calculate score
         let score = self.calculate_move_score(placed_tiles, dir);
 
-        let is_bingo = placed_tiles.len() == 7;
+        let is_bingo = placed_tiles.len() == RACK_SIZE;
         let leave_val = leave_value(leave);
         let equity = score as f32 + leave_val;
 
@@ -595,7 +612,7 @@ impl<'a> Solver<'a> {
         }
 
         // Add bingo bonus
-        if placed_tiles.len() == 7 {
+        if placed_tiles.len() == RACK_SIZE {
             total_score += self.config.bingo_bonus;
         }
 
@@ -654,7 +671,7 @@ impl<'a> Solver<'a> {
             };
 
             if let Some(tile) = tile {
-                let cell = self.board.get(ur, uc).unwrap();
+                let cell = self.board.get(ur, uc).expect("board position within validated bounds");
                 let letter_value = tile.value();
 
                 // Only apply premium if we're placing a tile here
@@ -705,7 +722,7 @@ impl<'a> Solver<'a> {
         }
 
         // Calculate cross word score
-        let cell = self.board.get(row, col).unwrap();
+        let cell = self.board.get(row, col).expect("board position within validated bounds");
         let mut word_score = 0;
         let mut word_multiplier = 1;
 

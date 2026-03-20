@@ -1,5 +1,10 @@
+//! Game statistics: phase detection, tile tracking, and rack analysis.
+//!
+//! Computes real-time stats from the current game state including bag estimates,
+//! power tile locations, and rack composition metrics.
+
 use crate::game::SolverState;
-use crate::tile::letter_value;
+use crate::tile::{letter_value, RACK_SIZE};
 use std::collections::HashMap;
 
 /// Game phase based on unseen tiles (bag + opponent's rack)
@@ -8,14 +13,16 @@ pub enum GamePhase {
     Early,   // 77+ unseen (70+ in bag)
     Mid,     // 37-76 unseen (30-69 in bag)
     Late,    // 8-36 unseen (1-29 in bag)
-    Endgame, // ≤7 unseen (bag empty, opponent has all)
+    Endgame, // ≤RACK_SIZE unseen (bag empty, opponent has all)
 }
+
+const RACK_SIZE_U32: u32 = RACK_SIZE as u32;
 
 impl GamePhase {
     /// Determine game phase from unseen tile count (bag + opponent's rack)
     pub fn from_unseen_count(count: u32) -> Self {
         match count {
-            0..=7 => GamePhase::Endgame,   // Bag empty, opponent has ≤7
+            0..=RACK_SIZE_U32 => GamePhase::Endgame,   // Bag empty, opponent has ≤RACK_SIZE
             8..=36 => GamePhase::Late,      // 1-29 in bag + 7 opponent
             37..=76 => GamePhase::Mid,      // 30-69 in bag + 7 opponent
             _ => GamePhase::Early,          // 70+ in bag + 7 opponent
@@ -53,12 +60,6 @@ pub struct GameStats {
     pub rack_value: u32,
     pub rack_duplicates: Vec<char>,
 
-    // Premium squares (open count)
-    pub open_3w: usize,
-    pub open_2w: usize,
-    pub open_3l: usize,
-    pub open_2l: usize,
-
     // Bag/game state (unseen = bag + opponent's rack)
     pub estimated_bag: u32,
     pub blanks_unseen: u32,
@@ -79,12 +80,9 @@ impl GameStats {
         let (rack_vowels, rack_consonants, rack_blanks, rack_value, rack_duplicates) =
             Self::analyze_rack(state);
 
-        // Premium squares
-        let (open_3w, open_2w, open_3l, open_2l) = state.board.count_open_premiums();
-
         // Unseen tiles (bag + opponent's rack)
         let unseen_tiles: u32 = unseen.values().sum();
-        let estimated_bag = unseen_tiles.saturating_sub(7); // Opponent has up to 7
+        let estimated_bag = unseen_tiles.saturating_sub(RACK_SIZE as u32); // Opponent has up to RACK_SIZE
         let blanks_unseen = unseen.get(&'?').copied().unwrap_or(0);
         let s_unseen = unseen.get(&'S').copied().unwrap_or(0);
 
@@ -99,10 +97,6 @@ impl GameStats {
             rack_blanks,
             rack_value,
             rack_duplicates,
-            open_3w,
-            open_2w,
-            open_3l,
-            open_2l,
             estimated_bag,
             blanks_unseen,
             s_unseen,
@@ -204,12 +198,6 @@ mod tests {
         assert_eq!(stats.rack_blanks, 0);
         assert_eq!(stats.rack_value, 0);
         assert!(stats.rack_duplicates.is_empty());
-
-        // All premium squares should be open
-        assert_eq!(stats.open_3w, 8);
-        assert_eq!(stats.open_2w, 8);
-        assert_eq!(stats.open_3l, 20);
-        assert_eq!(stats.open_2l, 20);
 
         // Full unseen tiles (100 total in Crossplay - empty rack)
         assert_eq!(state.unseen_tile_count(), 100);

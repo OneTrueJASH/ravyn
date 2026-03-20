@@ -1,12 +1,23 @@
-use crate::board::Board;
+//! Game state tracking: board + rack, tile distribution, and unseen tile calculation.
+//!
+//! The [`SolverState`] struct combines a board and rack, providing methods for
+//! move application, tile counting, and endgame detection.
+
+use crate::board::{Board, BOARD_SIZE};
 use crate::dictionary::Dictionary;
 use crate::solver::{Move, Solver};
-use crate::tile::{Rack, Tile};
+use crate::tile::{Rack, Tile, RACK_SIZE};
 use std::collections::HashMap;
+
+/// Total number of tiles in a standard Crossplay game.
+pub(crate) const TOTAL_TILES: usize = 100;
+
+/// Number of blank (wildcard) tiles in the distribution.
+pub(crate) const BLANK_COUNT: usize = 3;
 
 /// Tile distribution for Crossplay (100 tiles)
 fn standard_distribution() -> HashMap<char, u32> {
-    [
+    let dist: HashMap<char, u32> = [
         ('A', 9),
         ('B', 2),
         ('C', 2),
@@ -33,10 +44,16 @@ fn standard_distribution() -> HashMap<char, u32> {
         ('X', 1),
         ('Y', 2),
         ('Z', 1),
-        ('?', 3), // ? = blank
+        ('?', BLANK_COUNT as u32), // ? = blank
     ]
     .into_iter()
-    .collect()
+    .collect();
+    debug_assert_eq!(
+        dist.values().sum::<u32>() as usize,
+        TOTAL_TILES,
+        "Tile distribution must sum to TOTAL_TILES"
+    );
+    dist
 }
 
 /// The solver state - tracks board and rack for finding optimal plays
@@ -56,7 +73,7 @@ impl SolverState {
 
     /// Place a tile on the board (for recreating game state)
     pub fn place_tile(&mut self, row: usize, col: usize, letter: char, is_blank: bool) {
-        if row >= 15 || col >= 15 {
+        if row >= BOARD_SIZE || col >= BOARD_SIZE {
             return;
         }
 
@@ -116,8 +133,8 @@ impl SolverState {
     /// Count tiles placed on the board by letter
     pub fn count_board_tiles(&self) -> HashMap<char, u32> {
         let mut counts: HashMap<char, u32> = HashMap::new();
-        for row in 0..15 {
-            for col in 0..15 {
+        for row in 0..BOARD_SIZE {
+            for col in 0..BOARD_SIZE {
                 if let Some(tile) = self.board.get_tile(row, col) {
                     let key = if tile.is_blank { '?' } else { tile.letter };
                     *counts.entry(key).or_insert(0) += 1;
@@ -163,17 +180,10 @@ impl SolverState {
         self.unseen_tiles().values().sum::<u32>() as usize
     }
 
-    /// Estimate tiles remaining in bag (unseen minus opponent's max rack of 7)
-    /// Returns 0 if opponent likely has all remaining tiles
-    pub fn estimated_bag_count(&self) -> usize {
-        let unseen = self.unseen_tile_count();
-        unseen.saturating_sub(7)
-    }
-
     /// Check if we're in endgame (bag is empty, opponent has all remaining tiles)
     /// This is true when unseen tiles <= 7
     pub fn is_endgame(&self) -> bool {
-        self.unseen_tile_count() <= 7
+        self.unseen_tile_count() <= RACK_SIZE
     }
 
     /// Get suggested moves using the solver
@@ -211,5 +221,207 @@ impl SolverState {
 impl Default for SolverState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::Direction;
+    use crate::dictionary::load_default_dictionary;
+    use crate::solver::Move;
+    use crate::tile::Tile;
+
+    #[test]
+    fn test_new_state_is_empty() {
+        let state = SolverState::new();
+        for row in 0..15 {
+            for col in 0..15 {
+                assert!(state.get_tile(row, col).is_none());
+            }
+        }
+        assert!(state.rack.is_empty());
+        assert_eq!(state.rack.len(), 0);
+    }
+
+    #[test]
+    fn test_place_and_get_tile() {
+        let mut state = SolverState::new();
+        state.place_tile(7, 7, 'A', false);
+        let tile = state.get_tile(7, 7).expect("tile should be present");
+        assert_eq!(tile.letter, 'A');
+        assert!(!tile.is_blank);
+    }
+
+    #[test]
+    fn test_place_blank_tile() {
+        let mut state = SolverState::new();
+        state.place_tile(3, 4, 'S', true);
+        let tile = state.get_tile(3, 4).expect("tile should be present");
+        assert!(tile.is_blank);
+        assert_eq!(tile.letter, 'S');
+    }
+
+    #[test]
+    fn test_remove_tile() {
+        let mut state = SolverState::new();
+        state.place_tile(0, 0, 'Z', false);
+        assert!(state.get_tile(0, 0).is_some());
+        let removed = state.remove_tile(0, 0);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().letter, 'Z');
+        assert!(state.get_tile(0, 0).is_none());
+    }
+
+    #[test]
+    fn test_add_to_rack() {
+        let mut state = SolverState::new();
+        assert!(state.add_to_rack('A'));
+        assert!(state.add_to_rack('B'));
+        assert!(state.add_to_rack('C'));
+        assert_eq!(state.rack.len(), 3);
+        let tiles = state.rack.tiles();
+        assert_eq!(tiles[0].letter, 'A');
+        assert_eq!(tiles[1].letter, 'B');
+        assert_eq!(tiles[2].letter, 'C');
+    }
+
+    #[test]
+    fn test_add_to_rack_full() {
+        let mut state = SolverState::new();
+        for ch in ['A', 'B', 'C', 'D', 'E', 'F', 'G'] {
+            assert!(state.add_to_rack(ch), "should succeed adding '{}'", ch);
+        }
+        assert_eq!(state.rack.len(), 7);
+        assert!(!state.add_to_rack('H'));
+        assert_eq!(state.rack.len(), 7);
+    }
+
+    #[test]
+    fn test_pop_from_rack() {
+        let mut state = SolverState::new();
+        state.add_to_rack('X');
+        state.add_to_rack('Y');
+        assert_eq!(state.rack.len(), 2);
+        assert!(state.pop_from_rack());
+        assert_eq!(state.rack.len(), 1);
+        let tiles = state.rack.tiles();
+        assert_eq!(tiles[0].letter, 'X');
+    }
+
+    #[test]
+    fn test_clear_rack() {
+        let mut state = SolverState::new();
+        state.add_to_rack('A');
+        state.add_to_rack('B');
+        state.add_to_rack('C');
+        assert_eq!(state.rack.len(), 3);
+        state.clear_rack();
+        assert!(state.rack.is_empty());
+        assert_eq!(state.rack.len(), 0);
+    }
+
+    #[test]
+    fn test_unseen_tiles_empty_board() {
+        let state = SolverState::new();
+        let unseen = state.unseen_tiles();
+        let total: u32 = unseen.values().sum();
+        assert_eq!(total as usize, TOTAL_TILES);
+    }
+
+    #[test]
+    fn test_unseen_tiles_with_board_and_rack() {
+        let mut state = SolverState::new();
+        state.place_tile(7, 7, 'C', false);
+        state.place_tile(7, 8, 'A', false);
+        state.place_tile(7, 9, 'T', false);
+        state.add_to_rack('D');
+        state.add_to_rack('O');
+
+        let unseen = state.unseen_tiles();
+        let total: u32 = unseen.values().sum();
+        assert_eq!(total, 95);
+    }
+
+    #[test]
+    fn test_is_endgame() {
+        let mut state = SolverState::new();
+        assert!(!state.is_endgame());
+
+        // Place enough tiles to leave exactly 7 unseen
+        let dist = standard_distribution();
+        let mut placed = 0;
+        let target = 93;
+        'outer: for (&letter, &count) in &dist {
+            if letter == '?' {
+                continue;
+            }
+            for _ in 0..count {
+                if placed >= target {
+                    break 'outer;
+                }
+                let row = placed / 15;
+                let col = placed % 15;
+                if row < 15 {
+                    state.place_tile(row, col, letter, false);
+                    placed += 1;
+                }
+            }
+        }
+        assert!(state.unseen_tile_count() <= 7);
+        assert!(state.is_endgame());
+    }
+
+    #[test]
+    fn test_apply_move() {
+        let mut state = SolverState::new();
+        state.add_to_rack('C');
+        state.add_to_rack('A');
+        state.add_to_rack('T');
+
+        let mv = Move {
+            word: "CAT".to_string(),
+            row: 7,
+            col: 7,
+            direction: Direction::Horizontal,
+            score: 10,
+            tiles_used: vec![
+                (7, 7, Tile::new('C')),
+                (7, 8, Tile::new('A')),
+                (7, 9, Tile::new('T')),
+            ],
+            is_bingo: false,
+            leave: vec![],
+            equity: 10.0,
+        };
+
+        state.apply_move(&mv);
+
+        assert_eq!(state.get_tile(7, 7).unwrap().letter, 'C');
+        assert_eq!(state.get_tile(7, 8).unwrap().letter, 'A');
+        assert_eq!(state.get_tile(7, 9).unwrap().letter, 'T');
+        assert!(state.rack.is_empty());
+    }
+
+    #[test]
+    fn test_get_suggestions() {
+        let dict = load_default_dictionary().expect("dictionary should load");
+
+        let mut state = SolverState::new();
+        state.place_tile(7, 6, 'C', false);
+        state.place_tile(7, 7, 'A', false);
+        state.place_tile(7, 8, 'T', false);
+
+        state.add_to_rack('S');
+        state.add_to_rack('E');
+        state.add_to_rack('R');
+        state.add_to_rack('I');
+        state.add_to_rack('N');
+
+        let suggestions = state.get_suggestions(&dict);
+        assert!(
+            !suggestions.is_empty(),
+            "should find at least one valid move"
+        );
     }
 }
