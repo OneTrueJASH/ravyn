@@ -3,10 +3,11 @@
 //! Generates all legal moves for a given rack and board position,
 //! scoring each move and evaluating leave quality for equity ranking.
 
+use std::collections::HashSet;
+
 use crate::board::{Board, Direction, BOARD_SIZE};
 use crate::dictionary::Dictionary;
 use crate::tile::{Rack, Tile, RACK_SIZE};
-use std::collections::HashSet;
 
 /// Bonus points awarded when a player uses all tiles from their rack in a single turn.
 pub(crate) const BINGO_BONUS: u32 = 40;

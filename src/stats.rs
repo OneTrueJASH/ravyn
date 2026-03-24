@@ -3,9 +3,10 @@
 //! Computes real-time stats from the current game state including bag estimates,
 //! power tile locations, and rack composition metrics.
 
+use std::collections::HashMap;
+
 use crate::game::SolverState;
 use crate::tile::{letter_value, RACK_SIZE};
-use std::collections::HashMap;
 
 /// Game phase based on unseen tiles (bag + opponent's rack)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

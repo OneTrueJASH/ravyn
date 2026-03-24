@@ -3,11 +3,12 @@
 //! The [`SolverState`] struct combines a board and rack, providing methods for
 //! move application, tile counting, and endgame detection.
 
+use std::collections::HashMap;
+
 use crate::board::{Board, BOARD_SIZE};
 use crate::dictionary::Dictionary;
 use crate::solver::{Move, Solver};
 use crate::tile::{Rack, Tile, RACK_SIZE};
-use std::collections::HashMap;
 
 /// Total number of tiles in a standard Crossplay game.
 pub(crate) const TOTAL_TILES: usize = 100;
