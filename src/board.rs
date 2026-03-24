@@ -286,7 +286,6 @@ impl Board {
         }
         false
     }
-
 }
 
 impl Default for Board {

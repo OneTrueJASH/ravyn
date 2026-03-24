@@ -205,7 +205,10 @@ impl SolverState {
                 if let Some(idx) = self.rack.find_index(|t| t.is_blank) {
                     self.rack.clear_slot(idx);
                 }
-            } else if let Some(idx) = self.rack.find_index(|t| !t.is_blank && t.letter == tile.letter) {
+            } else if let Some(idx) = self
+                .rack
+                .find_index(|t| !t.is_blank && t.letter == tile.letter)
+            {
                 self.rack.clear_slot(idx);
             }
         }

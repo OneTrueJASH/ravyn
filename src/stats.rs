@@ -22,10 +22,10 @@ impl GamePhase {
     /// Determine game phase from unseen tile count (bag + opponent's rack)
     pub fn from_unseen_count(count: u32) -> Self {
         match count {
-            0..=RACK_SIZE_U32 => GamePhase::Endgame,   // Bag empty, opponent has ≤RACK_SIZE
-            8..=36 => GamePhase::Late,      // 1-29 in bag + 7 opponent
-            37..=76 => GamePhase::Mid,      // 30-69 in bag + 7 opponent
-            _ => GamePhase::Early,          // 70+ in bag + 7 opponent
+            0..=RACK_SIZE_U32 => GamePhase::Endgame, // Bag empty, opponent has ≤RACK_SIZE
+            8..=36 => GamePhase::Late,               // 1-29 in bag + 7 opponent
+            37..=76 => GamePhase::Mid,               // 30-69 in bag + 7 opponent
+            _ => GamePhase::Early,                   // 70+ in bag + 7 opponent
         }
     }
 
@@ -42,13 +42,12 @@ impl GamePhase {
 /// Location of a power tile (Q, Z, J, X)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileLocation {
-    InBag(u32),      // Count remaining in bag
-    OnBoard,         // All copies on board
-    InRack,          // All copies in rack
-    Split,           // Some on board, some in rack/bag
-    BoardAndRack,    // Some on board, some in rack
+    InBag(u32),   // Count remaining in bag
+    OnBoard,      // All copies on board
+    InRack,       // All copies in rack
+    Split,        // Some on board, some in rack/bag
+    BoardAndRack, // Some on board, some in rack
 }
-
 
 /// Computed game statistics
 #[derive(Debug, Clone)]
@@ -66,7 +65,6 @@ pub struct GameStats {
     pub s_unseen: u32,
     pub power_tiles: HashMap<char, TileLocation>,
     pub game_phase: GamePhase,
-
 }
 
 impl GameStats {
@@ -178,14 +176,14 @@ mod tests {
     #[test]
     fn test_game_phase() {
         // Test with unseen count (bag + opponent's rack of up to 7)
-        assert_eq!(GamePhase::from_unseen_count(100), GamePhase::Early);  // 93+ in bag
-        assert_eq!(GamePhase::from_unseen_count(77), GamePhase::Early);   // 70 in bag + 7 opp
-        assert_eq!(GamePhase::from_unseen_count(76), GamePhase::Mid);     // 69 in bag + 7 opp
-        assert_eq!(GamePhase::from_unseen_count(37), GamePhase::Mid);     // 30 in bag + 7 opp
-        assert_eq!(GamePhase::from_unseen_count(36), GamePhase::Late);    // 29 in bag + 7 opp
-        assert_eq!(GamePhase::from_unseen_count(8), GamePhase::Late);     // 1 in bag + 7 opp
-        assert_eq!(GamePhase::from_unseen_count(7), GamePhase::Endgame);  // 0 in bag, opp has 7
-        assert_eq!(GamePhase::from_unseen_count(3), GamePhase::Endgame);  // 0 in bag, opp has 3
+        assert_eq!(GamePhase::from_unseen_count(100), GamePhase::Early); // 93+ in bag
+        assert_eq!(GamePhase::from_unseen_count(77), GamePhase::Early); // 70 in bag + 7 opp
+        assert_eq!(GamePhase::from_unseen_count(76), GamePhase::Mid); // 69 in bag + 7 opp
+        assert_eq!(GamePhase::from_unseen_count(37), GamePhase::Mid); // 30 in bag + 7 opp
+        assert_eq!(GamePhase::from_unseen_count(36), GamePhase::Late); // 29 in bag + 7 opp
+        assert_eq!(GamePhase::from_unseen_count(8), GamePhase::Late); // 1 in bag + 7 opp
+        assert_eq!(GamePhase::from_unseen_count(7), GamePhase::Endgame); // 0 in bag, opp has 7
+        assert_eq!(GamePhase::from_unseen_count(3), GamePhase::Endgame); // 0 in bag, opp has 3
     }
 
     #[test]

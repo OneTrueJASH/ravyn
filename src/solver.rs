@@ -40,11 +40,7 @@ impl Move {
     ///
     /// The word uses lowercase letters to indicate blanks (e.g., "SNiPER" = blank as I)
     /// Returns None if the move can't be reconstructed with the given rack
-    pub fn from_external(
-        data: &ExternalMoveData,
-        board: &Board,
-        rack: &Rack,
-    ) -> Option<Self> {
+    pub fn from_external(data: &ExternalMoveData, board: &Board, rack: &Rack) -> Option<Self> {
         let word = data.word;
         let row = data.row;
         let col = data.col;
@@ -82,7 +78,9 @@ impl Move {
                 rack_remaining.iter().position(|t| t.is_blank)
             } else {
                 // Need the specific letter
-                rack_remaining.iter().position(|t| !t.is_blank && t.letter == letter)
+                rack_remaining
+                    .iter()
+                    .position(|t| !t.is_blank && t.letter == letter)
             };
 
             match tile_idx {
@@ -146,17 +144,17 @@ pub fn leave_value(leave: &[Tile]) -> f32 {
 
         // Individual letter values (approximate equity values)
         value += match letter {
-            'S' => 10.0,  // S is very valuable for hooks
-            'X' => 6.0,   // Good for short high-scoring plays
-            'Z' => 5.0,   // Similar to X
-            'E' => 4.0,   // Common, good for bingos
-            'A' => 3.0,   // Common vowel
-            'I' => 2.5,   // Good vowel
-            'N' => 3.5,   // Good consonant
-            'R' => 4.0,   // Very good consonant
-            'T' => 3.0,   // Good consonant
-            'O' => 1.5,   // Less useful vowel
-            'U' => 0.5,   // Least useful vowel (but helps with Q)
+            'S' => 10.0, // S is very valuable for hooks
+            'X' => 6.0,  // Good for short high-scoring plays
+            'Z' => 5.0,  // Similar to X
+            'E' => 4.0,  // Common, good for bingos
+            'A' => 3.0,  // Common vowel
+            'I' => 2.5,  // Good vowel
+            'N' => 3.5,  // Good consonant
+            'R' => 4.0,  // Very good consonant
+            'T' => 3.0,  // Good consonant
+            'O' => 1.5,  // Less useful vowel
+            'U' => 0.5,  // Least useful vowel (but helps with Q)
             'L' => 2.0,
             'D' => 1.5,
             'G' => 0.5,
@@ -169,9 +167,9 @@ pub fn leave_value(leave: &[Tile]) -> f32 {
             'Y' => -0.5,
             'W' => -2.0,
             'K' => -1.0,
-            'V' => -3.0,  // V is hard to use
-            'J' => -2.0,  // Hard to use, but high points
-            'Q' => -8.0,  // Very hard without U
+            'V' => -3.0, // V is hard to use
+            'J' => -2.0, // Hard to use, but high points
+            'Q' => -8.0, // Very hard without U
             _ => 0.0,
         };
 
@@ -187,7 +185,7 @@ pub fn leave_value(leave: &[Tile]) -> f32 {
         if *count >= 2 {
             // Penalty increases with more duplicates
             let penalty = match letter {
-                'E' | 'A' => 3.0 * (*count - 1) as f32,  // Common letters less bad
+                'E' | 'A' => 3.0 * (*count - 1) as f32, // Common letters less bad
                 _ => 5.0 * (*count - 1) as f32,
             };
             value -= penalty;
@@ -216,7 +214,6 @@ pub fn leave_value(leave: &[Tile]) -> f32 {
 
     value
 }
-
 
 /// Configuration for the solver
 #[derive(Debug, Clone)]
@@ -437,10 +434,12 @@ impl<'a> Solver<'a> {
 
         // If we've gone off the board, check if we have a valid word
         if !Board::is_valid_position(row as i32, col as i32) {
-            if current_word.len() >= 2 && self.dictionary.is_valid(&current_word)
-                && !placed_tiles.is_empty() {
-                    self.record_move(dir, &current_word, &placed_tiles, &available_tiles, moves);
-                }
+            if current_word.len() >= 2
+                && self.dictionary.is_valid(&current_word)
+                && !placed_tiles.is_empty()
+            {
+                self.record_move(dir, &current_word, &placed_tiles, &available_tiles, moves);
+            }
             return;
         }
 
@@ -671,7 +670,10 @@ impl<'a> Solver<'a> {
             };
 
             if let Some(tile) = tile {
-                let cell = self.board.get(ur, uc).expect("board position within validated bounds");
+                let cell = self
+                    .board
+                    .get(ur, uc)
+                    .expect("board position within validated bounds");
                 let letter_value = tile.value();
 
                 // Only apply premium if we're placing a tile here
@@ -722,7 +724,10 @@ impl<'a> Solver<'a> {
         }
 
         // Calculate cross word score
-        let cell = self.board.get(row, col).expect("board position within validated bounds");
+        let cell = self
+            .board
+            .get(row, col)
+            .expect("board position within validated bounds");
         let mut word_score = 0;
         let mut word_multiplier = 1;
 
@@ -774,7 +779,11 @@ impl<'a> Solver<'a> {
         });
 
         // Sort by equity descending (strategic value = score + leave value)
-        moves.sort_by(|a, b| b.equity.partial_cmp(&a.equity).unwrap_or(std::cmp::Ordering::Equal));
+        moves.sort_by(|a, b| {
+            b.equity
+                .partial_cmp(&a.equity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 }
 

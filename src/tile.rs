@@ -59,7 +59,9 @@ pub struct Rack {
 
 impl Rack {
     pub fn new() -> Self {
-        Rack { slots: [None; RACK_SIZE] }
+        Rack {
+            slots: [None; RACK_SIZE],
+        }
     }
 
     /// Add a tile to the first empty slot
@@ -98,7 +100,9 @@ impl Rack {
     where
         F: Fn(&Tile) -> bool,
     {
-        self.slots.iter().position(|s| s.as_ref().map(&predicate).unwrap_or(false))
+        self.slots
+            .iter()
+            .position(|s| s.as_ref().map(&predicate).unwrap_or(false))
     }
 }
 

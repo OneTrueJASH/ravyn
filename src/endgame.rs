@@ -101,7 +101,10 @@ impl<'a> EndgameSolver<'a> {
 
         log(&format!(
             "Endgame solver: {} candidate moves, {} our tiles, {} opp tiles, opponent_has_turn={}",
-            total, our_rack.len(), opponent_rack.len(), opponent_has_turn
+            total,
+            our_rack.len(),
+            opponent_rack.len(),
+            opponent_has_turn
         ));
 
         let mut results: Vec<EndgameMove> = Vec::with_capacity(total);
@@ -179,13 +182,21 @@ impl<'a> EndgameSolver<'a> {
         });
 
         // Log summary
-        log(&format!("Endgame solver complete: {} moves evaluated", results.len()));
+        log(&format!(
+            "Endgame solver complete: {} moves evaluated",
+            results.len()
+        ));
         if let Some(best) = results.first() {
             log(&format!(
                 "Best: {} at ({},{}) {:?} score={} value={} (opp responds: {} for {})",
-                best.mv.word, best.mv.row, best.mv.col, best.mv.direction,
-                best.mv.score, best.endgame_value,
-                best.opponent_best_word, best.opponent_best_score
+                best.mv.word,
+                best.mv.row,
+                best.mv.col,
+                best.mv.direction,
+                best.mv.score,
+                best.endgame_value,
+                best.opponent_best_word,
+                best.opponent_best_score
             ));
         }
 
@@ -275,8 +286,12 @@ mod tests {
         for (i, r) in results.iter().take(5).enumerate() {
             println!(
                 "  {}: {} score={} value={} (opp: {} for {})",
-                i + 1, r.mv.word, r.mv.score, r.endgame_value,
-                r.opponent_best_word, r.opponent_best_score
+                i + 1,
+                r.mv.word,
+                r.mv.score,
+                r.endgame_value,
+                r.opponent_best_word,
+                r.opponent_best_score
             );
         }
     }
@@ -302,8 +317,14 @@ mod tests {
         for (i, r) in results.iter().take(10).enumerate() {
             println!(
                 "  {}: {} at ({},{}) score={} value={} (opp: {} for {})",
-                i + 1, r.mv.word, r.mv.row, r.mv.col, r.mv.score,
-                r.endgame_value, r.opponent_best_word, r.opponent_best_score
+                i + 1,
+                r.mv.word,
+                r.mv.row,
+                r.mv.col,
+                r.mv.score,
+                r.endgame_value,
+                r.opponent_best_word,
+                r.opponent_best_score
             );
         }
 
