@@ -310,13 +310,15 @@ impl<'a> Solver<'a> {
         if !existing_prefix.is_empty() {
             // Check if this prefix is valid before proceeding
             if self.dictionary.has_prefix(&existing_prefix) {
+                let mut available_tiles: Vec<Tile> = rack.tiles().to_vec();
+                let mut placed_tiles: Vec<(usize, usize, Tile)> = Vec::new();
                 self.extend_right(
                     anchor_row,
                     anchor_col,
                     dir,
                     existing_prefix,
-                    rack.tiles(),
-                    Vec::new(),
+                    &mut available_tiles,
+                    &mut placed_tiles,
                     moves,
                 );
             }
@@ -328,13 +330,15 @@ impl<'a> Solver<'a> {
                 let start_row = (anchor_row as i32 - dr * prefix_len as i32) as usize;
                 let start_col = (anchor_col as i32 - dc * prefix_len as i32) as usize;
 
+                let mut available_tiles: Vec<Tile> = rack.tiles().to_vec();
+                let mut placed_tiles: Vec<(usize, usize, Tile)> = Vec::new();
                 self.extend_right(
                     start_row,
                     start_col,
                     dir,
                     String::new(),
-                    rack.tiles(),
-                    Vec::new(),
+                    &mut available_tiles,
+                    &mut placed_tiles,
                     moves,
                 );
             }
@@ -427,8 +431,8 @@ impl<'a> Solver<'a> {
         col: usize,
         dir: Direction,
         current_word: String,
-        available_tiles: Vec<Tile>,
-        placed_tiles: Vec<(usize, usize, Tile)>,
+        available_tiles: &mut Vec<Tile>,
+        placed_tiles: &mut Vec<(usize, usize, Tile)>,
         moves: &mut Vec<Move>,
     ) {
         let (dr, dc) = dir.delta();
@@ -439,7 +443,7 @@ impl<'a> Solver<'a> {
                 && self.dictionary.is_valid(&current_word)
                 && !placed_tiles.is_empty()
             {
-                self.record_move(dir, &current_word, &placed_tiles, &available_tiles, moves);
+                self.record_move(dir, &current_word, placed_tiles, available_tiles, moves);
             }
             return;
         }
@@ -481,7 +485,7 @@ impl<'a> Solver<'a> {
                 });
 
                 if connects {
-                    self.record_move(dir, &current_word, &placed_tiles, &available_tiles, moves);
+                    self.record_move(dir, &current_word, placed_tiles, available_tiles, moves);
                 }
             }
 
@@ -516,17 +520,14 @@ impl<'a> Solver<'a> {
 
                     tried_letters.insert(letter);
 
-                    // Remove tile from available
-                    let mut new_available = available_tiles.clone();
-                    let used_tile = new_available.remove(i);
-
-                    let mut new_placed = placed_tiles.clone();
+                    // In-place backtracking: remove tile, recurse, restore
+                    let used_tile = available_tiles.swap_remove(i);
                     let placed_tile = if used_tile.is_blank {
                         Tile::blank(letter)
                     } else {
                         used_tile
                     };
-                    new_placed.push((row, col, placed_tile));
+                    placed_tiles.push((row, col, placed_tile));
 
                     let next_row = (row as i32 + dr) as usize;
                     let next_col = (col as i32 + dc) as usize;
@@ -536,10 +537,19 @@ impl<'a> Solver<'a> {
                         next_col,
                         dir,
                         new_word,
-                        new_available,
-                        new_placed,
+                        available_tiles,
+                        placed_tiles,
                         moves,
                     );
+
+                    // Undo: restore state
+                    placed_tiles.pop();
+                    // Restore the tile to its original position:
+                    // swap_remove(i) moved the last element to position i,
+                    // so we push the used tile back and swap it into position i.
+                    available_tiles.push(used_tile);
+                    let last = available_tiles.len() - 1;
+                    available_tiles.swap(i, last);
                 }
             }
         }
