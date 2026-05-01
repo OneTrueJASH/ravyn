@@ -3,11 +3,27 @@
 //! Generates all legal moves for a given rack and board position,
 //! scoring each move and evaluating leave quality for equity ranking.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::board::{Board, Direction, BOARD_SIZE};
 use crate::dictionary::Dictionary;
 use crate::tile::{Rack, Tile, RACK_SIZE};
+
+/// Pre-computed cross-check sets for every empty square on the board.
+///
+/// For each empty position `(row, col)`, stores which letters are valid
+/// when placing a tile in the horizontal direction (vertical cross-check)
+/// and in the vertical direction (horizontal cross-check). Computing these
+/// once per `find_moves()` call avoids redundant dictionary lookups when
+/// the same square is visited from multiple anchors or prefix lengths.
+struct CrossCheckCache {
+    /// Cross-checks for tiles placed as part of a horizontal word
+    /// (constraints from vertical neighbors)
+    horizontal: HashMap<(usize, usize), HashSet<char>>,
+    /// Cross-checks for tiles placed as part of a vertical word
+    /// (constraints from horizontal neighbors)
+    vertical: HashMap<(usize, usize), HashSet<char>>,
+}
 
 /// Bonus points awarded when a player uses all tiles from their rack in a single turn.
 pub(crate) const BINGO_BONUS: u32 = 40;
@@ -122,20 +138,38 @@ impl Move {
     }
 }
 
-/// Calculate the strategic value of a leave (tiles remaining after a play)
+/// Calculate the strategic value of a leave (tiles remaining after a play).
+///
+/// If `unseen_count` is provided, adjusts weights based on game phase:
+/// - Early/mid game (many unseen): favor rack balance and bingo potential
+/// - Late game (few unseen): favor flexibility and scoring power
+/// - Endgame (≤7 unseen): leave value is nearly irrelevant (no redraws)
 pub fn leave_value(leave: &[Tile]) -> f32 {
+    leave_value_with_phase(leave, None)
+}
+
+/// Leave value with optional game-phase awareness.
+pub fn leave_value_with_phase(leave: &[Tile], unseen_count: Option<usize>) -> f32 {
     if leave.is_empty() {
         return 0.0;
     }
 
+    // Phase multiplier: leave matters less as the game ends
+    let phase_scale = match unseen_count {
+        Some(n) if n <= 7 => 0.25,  // Endgame: leave barely matters
+        Some(n) if n <= 14 => 0.6,  // Pre-endgame: leave somewhat matters
+        _ => 1.0,                    // Early/mid/late: full weight
+    };
+
     let mut value = 0.0;
     let mut vowels = 0;
     let mut consonants = 0;
-    let mut letter_counts: std::collections::HashMap<char, i32> = std::collections::HashMap::new();
+    let mut letter_counts: HashMap<char, i32> = HashMap::new();
 
     for tile in leave {
         if tile.is_blank {
-            // Blanks are very valuable
+            // Blanks are extremely valuable: they enable bingos and flexible plays.
+            // Value scales with game phase (less valuable in endgame with no redraws).
             value += 25.0;
             continue;
         }
@@ -143,34 +177,37 @@ pub fn leave_value(leave: &[Tile]) -> f32 {
         let letter = tile.letter;
         *letter_counts.entry(letter).or_insert(0) += 1;
 
-        // Individual letter values (approximate equity values)
+        // Individual letter values calibrated for Crossplay.
+        // These approximate the expected equity contribution of having each
+        // letter on your rack, based on hookability, bingo potential, and
+        // scoring power in Crossplay's tile distribution and point values.
         value += match letter {
-            'S' => 10.0, // S is very valuable for hooks
-            'X' => 6.0,  // Good for short high-scoring plays
-            'Z' => 5.0,  // Similar to X
-            'E' => 4.0,  // Common, good for bingos
-            'A' => 3.0,  // Common vowel
-            'I' => 2.5,  // Good vowel
-            'N' => 3.5,  // Good consonant
-            'R' => 4.0,  // Very good consonant
-            'T' => 3.0,  // Good consonant
-            'O' => 1.5,  // Less useful vowel
-            'U' => 0.5,  // Least useful vowel (but helps with Q)
-            'L' => 2.0,
-            'D' => 1.5,
-            'G' => 0.5,
-            'C' => 0.0,
-            'M' => 1.0,
-            'P' => 0.5,
-            'H' => 1.0,
-            'B' => -1.0,
-            'F' => -1.0,
-            'Y' => -0.5,
-            'W' => -2.0,
-            'K' => -1.0,
-            'V' => -3.0, // V is hard to use
-            'J' => -2.0, // Hard to use, but high points
-            'Q' => -8.0, // Very hard without U
+            'S' => 8.0,  // Excellent: hooks (plurals, verb forms), bingo-friendly
+            'R' => 4.5,  // Top consonant for bingos (-ER, -ING+R, RE-)
+            'E' => 3.5,  // Most common, essential for bingos (-ED, -ER, -ES)
+            'N' => 3.5,  // Strong bingo consonant (-ING, -TION, UN-)
+            'A' => 2.5,  // Good vowel, many 2-letter words (AA, AB, AD...)
+            'I' => 2.0,  // Good vowel, -ING, -TION
+            'T' => 2.5,  // Good consonant, -TION, -EST
+            'L' => 2.0,  // Decent consonant, -LY, -LE
+            'D' => 1.5,  // Good for -ED past tenses
+            'O' => 1.0,  // Less versatile vowel
+            'H' => 1.0,  // CH, SH, TH combos
+            'G' => 0.5,  // -ING (good with I,N), otherwise middling
+            'U' => 0.5,  // Weak vowel but essential for Q plays
+            'M' => 0.5,  // Average consonant
+            'P' => 0.0,  // Average consonant
+            'C' => -0.5, // Limited hooks, awkward combos
+            'Y' => -0.5, // Semi-vowel, hard to combine
+            'B' => -1.5, // Few useful combos
+            'F' => -1.5, // Few useful combos
+            'K' => -1.5, // High point value but hard to use in bingos
+            'W' => -2.0, // Very limited combos
+            'J' => -2.5, // High points but almost no bingo potential
+            'X' => 3.5,  // High scoring in short plays (AX, EX, XI, XU)
+            'Z' => 2.5,  // High scoring (ZA, ZO, ZAP, ZIP)
+            'V' => -3.5, // Hardest letter: few words, no 2-letter words
+            'Q' => -6.0, // Very hard without U, limited word options
             _ => 0.0,
         };
 
@@ -181,28 +218,35 @@ pub fn leave_value(leave: &[Tile]) -> f32 {
         }
     }
 
-    // Penalize duplicates heavily
+    // Penalize duplicate tiles (diminishing returns on same letter)
     for (letter, count) in &letter_counts {
         if *count >= 2 {
-            // Penalty increases with more duplicates
+            let extra = (*count - 1) as f32;
             let penalty = match letter {
-                'E' | 'A' => 3.0 * (*count - 1) as f32, // Common letters less bad
-                _ => 5.0 * (*count - 1) as f32,
+                // Common tiles: duplicates are less painful
+                'E' => 2.5 * extra,
+                'A' | 'I' | 'O' => 3.0 * extra,
+                // S is special: first S is great, second is still good for hooks
+                'S' => 2.0 * extra,
+                // Uncommon tiles: duplicates are very bad
+                'V' | 'W' | 'Q' | 'J' | 'K' | 'X' | 'Z' => 6.0 * extra,
+                _ => 4.0 * extra,
             };
             value -= penalty;
         }
     }
 
     // Penalize vowel/consonant imbalance
-    let total = leave.len() as i32;
-    if total > 1 {
-        let ideal_vowels = (total as f32 * 0.4).round() as i32; // ~40% vowels ideal
+    let total_letters = (vowels + consonants) as i32;
+    if total_letters > 1 {
+        // Ideal ratio is ~40% vowels for bingo potential
+        let ideal_vowels = (total_letters as f32 * 0.4).round() as i32;
         let vowel_diff = (vowels - ideal_vowels).abs();
-        value -= vowel_diff as f32 * 2.0;
+        value -= vowel_diff as f32 * 2.5;
 
         // Heavy penalty for all vowels or all consonants
         if vowels == 0 || consonants == 0 {
-            value -= 8.0;
+            value -= 10.0;
         }
     }
 
@@ -210,10 +254,22 @@ pub fn leave_value(leave: &[Tile]) -> f32 {
     if letter_counts.get(&'Q').copied().unwrap_or(0) > 0
         && letter_counts.get(&'U').copied().unwrap_or(0) == 0
     {
-        value -= 10.0;
+        value -= 12.0;
     }
 
-    value
+    // Synergy bonuses for bingo-friendly combinations
+    let has = |c: char| letter_counts.get(&c).copied().unwrap_or(0) > 0;
+    if has('I') && has('N') && has('G') {
+        value += 3.0; // -ING is a powerful bingo ending
+    }
+    if has('E') && has('R') {
+        value += 1.5; // -ER is very common
+    }
+    if has('E') && has('D') {
+        value += 1.0; // -ED is common
+    }
+
+    value * phase_scale
 }
 
 /// Configuration for the solver
@@ -250,6 +306,13 @@ impl<'a> Solver<'a> {
     pub fn find_moves(&self, rack: &Rack) -> Vec<Move> {
         let mut moves = Vec::new();
 
+        // Pre-compute cross-checks for all empty squares.
+        // This is a major optimization: each square's cross-checks depend only
+        // on the board state (not the rack), so computing them once eliminates
+        // redundant dictionary lookups when the same position is visited from
+        // multiple anchors or prefix lengths.
+        let cache = self.precompute_cross_checks();
+
         // Get all anchor squares
         let anchors = self.board.get_anchors();
 
@@ -261,6 +324,7 @@ impl<'a> Solver<'a> {
                 anchor_col,
                 Direction::Horizontal,
                 rack,
+                &cache,
                 &mut moves,
             );
 
@@ -270,6 +334,7 @@ impl<'a> Solver<'a> {
                 anchor_col,
                 Direction::Vertical,
                 rack,
+                &cache,
                 &mut moves,
             );
         }
@@ -280,12 +345,110 @@ impl<'a> Solver<'a> {
         moves
     }
 
+    /// Score a set of placed tiles against the current board.
+    ///
+    /// This is the public entry point for scoring externally-detected moves
+    /// (e.g., opponent tiles placed by the user). The board should be the
+    /// state BEFORE the tiles were placed (so premiums are still available).
+    pub fn score_placed_tiles(
+        &self,
+        placed_tiles: &[(usize, usize, Tile)],
+        dir: Direction,
+    ) -> u32 {
+        self.calculate_move_score(placed_tiles, dir)
+    }
+
+    /// Pre-compute cross-check sets for every empty square on the board.
+    fn precompute_cross_checks(&self) -> CrossCheckCache {
+        let all_letters: HashSet<char> = ('A'..='Z').collect();
+        let mut horizontal = HashMap::new();
+        let mut vertical = HashMap::new();
+
+        for row in 0..BOARD_SIZE {
+            for col in 0..BOARD_SIZE {
+                if !self.board.is_empty(row, col) {
+                    continue;
+                }
+                // For horizontal words: check vertical (perpendicular) constraints
+                horizontal.insert(
+                    (row, col),
+                    self.compute_cross_check_at(row, col, Direction::Vertical, &all_letters),
+                );
+                // For vertical words: check horizontal (perpendicular) constraints
+                vertical.insert(
+                    (row, col),
+                    self.compute_cross_check_at(row, col, Direction::Horizontal, &all_letters),
+                );
+            }
+        }
+
+        CrossCheckCache {
+            horizontal,
+            vertical,
+        }
+    }
+
+    /// Compute which letters are valid at a position given perpendicular constraints.
+    fn compute_cross_check_at(
+        &self,
+        row: usize,
+        col: usize,
+        cross_dir: Direction,
+        all_letters: &HashSet<char>,
+    ) -> HashSet<char> {
+        let (dr, dc) = cross_dir.delta();
+
+        // Find letters already above/left in the cross direction
+        let mut prefix = String::new();
+        let mut r = row as i32 - dr;
+        let mut c = col as i32 - dc;
+        while Board::is_valid_position(r, c) {
+            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
+                prefix.insert(0, tile.letter);
+                r -= dr;
+                c -= dc;
+            } else {
+                break;
+            }
+        }
+
+        // Find letters already below/right in the cross direction
+        let mut suffix = String::new();
+        let mut r = row as i32 + dr;
+        let mut c = col as i32 + dc;
+        while Board::is_valid_position(r, c) {
+            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
+                suffix.push(tile.letter);
+                r += dr;
+                c += dc;
+            } else {
+                break;
+            }
+        }
+
+        // No adjacent tiles in cross direction → any letter is valid
+        if prefix.is_empty() && suffix.is_empty() {
+            return all_letters.clone();
+        }
+
+        // Find all letters that form valid cross words
+        let mut valid = HashSet::new();
+        for letter in 'A'..='Z' {
+            let cross_word = format!("{}{}{}", prefix, letter, suffix);
+            if self.dictionary.is_valid(&cross_word) {
+                valid.insert(letter);
+            }
+        }
+        valid
+    }
+
     fn generate_moves_at_anchor(
         &self,
         anchor_row: usize,
         anchor_col: usize,
         dir: Direction,
         rack: &Rack,
+        cache: &CrossCheckCache,
         moves: &mut Vec<Move>,
     ) {
         let (dr, dc) = dir.delta();
@@ -319,6 +482,7 @@ impl<'a> Solver<'a> {
                     existing_prefix,
                     &mut available_tiles,
                     &mut placed_tiles,
+                    cache,
                     moves,
                 );
             }
@@ -339,6 +503,7 @@ impl<'a> Solver<'a> {
                     String::new(),
                     &mut available_tiles,
                     &mut placed_tiles,
+                    cache,
                     moves,
                 );
             }
@@ -374,56 +539,6 @@ impl<'a> Solver<'a> {
         limit.min(RACK_SIZE)
     }
 
-    fn get_cross_checks(&self, row: usize, col: usize, cross_dir: Direction) -> HashSet<char> {
-        let (dr, dc) = cross_dir.delta();
-
-        // Find what letters are already above/left
-        let mut prefix = String::new();
-        let mut r = row as i32 - dr;
-        let mut c = col as i32 - dc;
-
-        while Board::is_valid_position(r, c) {
-            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
-                prefix.insert(0, tile.letter);
-                r -= dr;
-                c -= dc;
-            } else {
-                break;
-            }
-        }
-
-        // Find what letters are already below/right
-        let mut suffix = String::new();
-        let mut r = row as i32 + dr;
-        let mut c = col as i32 + dc;
-
-        while Board::is_valid_position(r, c) {
-            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
-                suffix.push(tile.letter);
-                r += dr;
-                c += dc;
-            } else {
-                break;
-            }
-        }
-
-        // If no adjacent tiles in cross direction, any letter is valid
-        if prefix.is_empty() && suffix.is_empty() {
-            return ('A'..='Z').collect();
-        }
-
-        // Find all letters that form valid cross words
-        let mut valid = HashSet::new();
-        for letter in 'A'..='Z' {
-            let cross_word = format!("{}{}{}", prefix, letter, suffix);
-            if self.dictionary.is_valid(&cross_word) {
-                valid.insert(letter);
-            }
-        }
-
-        valid
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn extend_right(
         &self,
@@ -433,6 +548,7 @@ impl<'a> Solver<'a> {
         current_word: String,
         available_tiles: &mut Vec<Tile>,
         placed_tiles: &mut Vec<(usize, usize, Tile)>,
+        cache: &CrossCheckCache,
         moves: &mut Vec<Move>,
     ) {
         let (dr, dc) = dir.delta();
@@ -466,12 +582,20 @@ impl<'a> Solver<'a> {
                     new_word,
                     available_tiles,
                     placed_tiles,
+                    cache,
                     moves,
                 );
             }
         } else {
-            // Try placing each available tile
-            let cross_checks = self.get_cross_checks(row, col, dir.perpendicular());
+            // Look up pre-computed cross-checks for this position and direction
+            let cross_checks_map = match dir {
+                Direction::Horizontal => &cache.horizontal,
+                Direction::Vertical => &cache.vertical,
+            };
+            let all_letters: HashSet<char> = ('A'..='Z').collect();
+            let cross_checks = cross_checks_map
+                .get(&(row, col))
+                .unwrap_or(&all_letters);
 
             // First, check if the current word is complete (valid word that touches existing tiles)
             if current_word.len() >= 2
@@ -489,9 +613,30 @@ impl<'a> Solver<'a> {
                 }
             }
 
-            // Try placing tiles from rack
+            // Build iteration order: non-blank tiles first, then blanks.
+            //
+            // This is critical for completeness: placing a regular tile at the
+            // current position keeps the blank available for later positions,
+            // where it can represent ANY letter. This explores a strict superset
+            // of plays compared to committing the blank here. With non-blanks
+            // first, the tried_letters set correctly prunes blank-as-X when
+            // regular X was already tried (since that path is strictly better).
+            let tile_indices: Vec<usize> = {
+                let mut non_blank: Vec<usize> = Vec::new();
+                let mut blank: Vec<usize> = Vec::new();
+                for idx in 0..available_tiles.len() {
+                    if available_tiles[idx].is_blank {
+                        blank.push(idx);
+                    } else {
+                        non_blank.push(idx);
+                    }
+                }
+                non_blank.extend(blank);
+                non_blank
+            };
+
             let mut tried_letters = HashSet::new();
-            for i in 0..available_tiles.len() {
+            for &i in &tile_indices {
                 let tile = &available_tiles[i];
                 let letters_to_try: Vec<char> = if tile.is_blank {
                     ('A'..='Z').collect()
@@ -500,7 +645,10 @@ impl<'a> Solver<'a> {
                 };
 
                 for letter in letters_to_try {
-                    // Skip if we've already tried this letter
+                    // Skip if we've already tried this letter at this position.
+                    // Safe because non-blank tiles are iterated first: if regular X
+                    // was tried, blank-as-X is redundant (regular X path keeps the
+                    // blank for future positions, exploring a superset of plays).
                     if tried_letters.contains(&letter) {
                         continue;
                     }
@@ -539,6 +687,7 @@ impl<'a> Solver<'a> {
                         new_word,
                         available_tiles,
                         placed_tiles,
+                        cache,
                         moves,
                     );
 
@@ -931,5 +1080,204 @@ mod tests {
             .filter(|m| m.direction == Direction::Vertical)
             .count();
         println!("  Vertical moves: {}", vertical_moves);
+    }
+
+    /// Proves that rack tile order does NOT affect which plays are found.
+    /// This is the regression test for the blank-tile ordering bug:
+    /// before the fix, having blank before a matching regular tile caused
+    /// the solver to miss plays that needed the blank at a later position.
+    #[test]
+    fn test_blank_ordering_does_not_affect_play_set() {
+        let dict = load_default_dictionary().unwrap();
+        let board = Board::new(); // first turn
+
+        // Rack 1: blank FIRST, then regular tiles
+        let mut rack_blank_first = Rack::new();
+        rack_blank_first.add(Tile::blank(' '));
+        rack_blank_first.add(Tile::new('S'));
+        rack_blank_first.add(Tile::new('E'));
+        rack_blank_first.add(Tile::new('T'));
+        rack_blank_first.add(Tile::new('R'));
+        rack_blank_first.add(Tile::new('I'));
+        rack_blank_first.add(Tile::new('N'));
+
+        // Rack 2: blank LAST, same letters
+        let mut rack_blank_last = Rack::new();
+        rack_blank_last.add(Tile::new('S'));
+        rack_blank_last.add(Tile::new('E'));
+        rack_blank_last.add(Tile::new('T'));
+        rack_blank_last.add(Tile::new('R'));
+        rack_blank_last.add(Tile::new('I'));
+        rack_blank_last.add(Tile::new('N'));
+        rack_blank_last.add(Tile::blank(' '));
+
+        let solver = Solver::new(&board, &dict);
+        let moves1 = solver.find_moves(&rack_blank_first);
+        let moves2 = solver.find_moves(&rack_blank_last);
+
+        // Extract unique (word, position, direction) combos
+        let words1: HashSet<_> = moves1
+            .iter()
+            .map(|m| (m.word.clone(), m.row, m.col, m.direction))
+            .collect();
+        let words2: HashSet<_> = moves2
+            .iter()
+            .map(|m| (m.word.clone(), m.row, m.col, m.direction))
+            .collect();
+
+        let only_in_1: Vec<_> = words1.difference(&words2).collect();
+        let only_in_2: Vec<_> = words2.difference(&words1).collect();
+
+        println!(
+            "Blank-first: {} plays, Blank-last: {} plays",
+            words1.len(),
+            words2.len()
+        );
+        if !only_in_1.is_empty() {
+            println!("Only in blank-first ({}):", only_in_1.len());
+            for w in only_in_1.iter().take(10) {
+                println!("  {} at ({},{}) {:?}", w.0, w.1, w.2, w.3);
+            }
+        }
+        if !only_in_2.is_empty() {
+            println!("Only in blank-last ({}):", only_in_2.len());
+            for w in only_in_2.iter().take(10) {
+                println!("  {} at ({},{}) {:?}", w.0, w.1, w.2, w.3);
+            }
+        }
+
+        assert_eq!(
+            words1.len(),
+            words2.len(),
+            "Rack tile order should not affect number of plays found. \
+             Blank-first found {}, blank-last found {}",
+            words1.len(),
+            words2.len(),
+        );
+        assert!(
+            only_in_1.is_empty() && only_in_2.is_empty(),
+            "Rack tile order should not affect WHICH plays are found"
+        );
+    }
+
+    /// Test that blank tiles enable plays with letters not in the rack.
+    #[test]
+    fn test_blank_enables_missing_letters() {
+        let dict = load_default_dictionary().unwrap();
+        let board = Board::new();
+
+        // Rack with blank and common letters but no Z, X, J, Q
+        let mut rack = Rack::new();
+        rack.add(Tile::blank(' '));
+        rack.add(Tile::new('E'));
+        rack.add(Tile::new('S'));
+        rack.add(Tile::new('T'));
+
+        let solver = Solver::new(&board, &dict);
+        let moves = solver.find_moves(&rack);
+
+        // Should find words that require letters NOT in {E, S, T}
+        // e.g., "BEST" (needs B from blank), "ZEST" (needs Z from blank)
+        let needs_blank = moves.iter().filter(|m| {
+            m.tiles_used.iter().any(|(_, _, t)| t.is_blank)
+        });
+        let blank_words: HashSet<_> = needs_blank.map(|m| m.word.clone()).collect();
+
+        println!(
+            "Found {} unique words using blank tile:",
+            blank_words.len()
+        );
+        for w in blank_words.iter().take(20) {
+            print!("{} ", w);
+        }
+        println!();
+
+        // Must find words using the blank for letters not in the rack
+        assert!(
+            blank_words.len() > 20,
+            "Should find many words using blank as various letters, found {}",
+            blank_words.len()
+        );
+
+        // Specific check: ZEST should be found (Z from blank)
+        assert!(
+            moves.iter().any(|m| m.word == "ZEST"),
+            "Should find ZEST (Z from blank)"
+        );
+    }
+
+    /// Test blank plays on a populated board with cross-check constraints.
+    #[test]
+    fn test_blank_with_cross_checks() {
+        let dict = load_default_dictionary().unwrap();
+        let mut board = Board::new();
+
+        // Place "WORD" horizontally at (7, 6)-(7, 9)
+        board.place_tile(7, 6, Tile::new('W'));
+        board.place_tile(7, 7, Tile::new('O'));
+        board.place_tile(7, 8, Tile::new('R'));
+        board.place_tile(7, 9, Tile::new('D'));
+        board.mark_premium_used(7, 6);
+        board.mark_premium_used(7, 7);
+        board.mark_premium_used(7, 8);
+        board.mark_premium_used(7, 9);
+
+        // Rack with blank + common tiles. Blank should enable plays
+        // that need uncommon letters for cross-word constraints.
+        let mut rack = Rack::new();
+        rack.add(Tile::blank(' '));
+        rack.add(Tile::new('E'));
+        rack.add(Tile::new('A'));
+        rack.add(Tile::new('T'));
+        rack.add(Tile::new('S'));
+
+        let solver = Solver::new(&board, &dict);
+        let moves = solver.find_moves(&rack);
+
+        // Should find plays using the blank
+        let blank_plays: Vec<_> = moves
+            .iter()
+            .filter(|m| m.tiles_used.iter().any(|(_, _, t)| t.is_blank))
+            .collect();
+
+        println!(
+            "On populated board: {} total moves, {} using blank",
+            moves.len(),
+            blank_plays.len()
+        );
+        for m in blank_plays.iter().take(10) {
+            println!(
+                "  {} at ({},{}) {:?} score={}",
+                m.word, m.row, m.col, m.direction, m.score
+            );
+        }
+
+        assert!(
+            !blank_plays.is_empty(),
+            "Should find plays using blank on populated board"
+        );
+
+        // Verify both rack orders produce the same plays
+        let mut rack_reversed = Rack::new();
+        rack_reversed.add(Tile::new('S'));
+        rack_reversed.add(Tile::new('T'));
+        rack_reversed.add(Tile::new('A'));
+        rack_reversed.add(Tile::new('E'));
+        rack_reversed.add(Tile::blank(' '));
+
+        let moves_reversed = solver.find_moves(&rack_reversed);
+        let words1: HashSet<_> = moves
+            .iter()
+            .map(|m| (m.word.clone(), m.row, m.col, m.direction))
+            .collect();
+        let words2: HashSet<_> = moves_reversed
+            .iter()
+            .map(|m| (m.word.clone(), m.row, m.col, m.direction))
+            .collect();
+
+        assert_eq!(
+            words1, words2,
+            "Rack order should not affect plays on populated board"
+        );
     }
 }
