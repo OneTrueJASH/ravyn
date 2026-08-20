@@ -147,16 +147,6 @@ impl Move {
     }
 }
 
-/// Calculate the strategic value of a leave (tiles remaining after a play).
-///
-/// If `unseen_count` is provided, adjusts weights based on game phase:
-/// - Early/mid game (many unseen): favor rack balance and bingo potential
-/// - Late game (few unseen): favor flexibility and scoring power
-/// - Endgame (≤7 unseen): leave value is nearly irrelevant (no redraws)
-pub fn leave_value(leave: &[Tile]) -> f32 {
-    leave_value_with_phase(leave, None)
-}
-
 /// Per-letter heuristic leave value with game-phase scaling.
 ///
 /// This is the fallback when no fitted leave table is loaded; prefer

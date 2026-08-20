@@ -161,10 +161,12 @@ impl LeaveValues {
     }
 
     /// Number of leaves in the table.
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    #[allow(dead_code)] // library API (clippy::len_without_is_empty)
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }

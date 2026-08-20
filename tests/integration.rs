@@ -172,7 +172,7 @@ fn test_move_apply_and_resolve() {
     // With remaining rack tiles and more tiles on the board, we may or may not
     // find moves, but the solver must not panic.
     // If we still have rack tiles, we almost certainly find something.
-    if state.rack.len() > 0 {
+    if !state.rack.is_empty() {
         assert!(
             !new_moves.is_empty(),
             "With remaining rack tiles on a non-trivial board, should find moves"

@@ -233,33 +233,6 @@ impl Board {
         self.get(row, col).map(|c| c.is_empty()).unwrap_or(true)
     }
 
-    /// Check if the board is completely empty (first turn)
-    pub fn is_first_turn(&self) -> bool {
-        self.cells
-            .iter()
-            .all(|row| row.iter().all(|c| c.is_empty()))
-    }
-
-    /// Get all anchor squares (empty squares adjacent to placed tiles)
-    pub fn get_anchors(&self) -> Vec<(usize, usize)> {
-        let mut anchors = Vec::new();
-
-        // On first turn, only the center is an anchor
-        if self.is_first_turn() {
-            anchors.push((7, 7));
-            return anchors;
-        }
-
-        for row in 0..BOARD_SIZE {
-            for col in 0..BOARD_SIZE {
-                if self.is_empty(row, col) && self.has_adjacent_tile(row, col) {
-                    anchors.push((row, col));
-                }
-            }
-        }
-        anchors
-    }
-
     /// Check if a position has an adjacent tile
     pub fn has_adjacent_tile(&self, row: usize, col: usize) -> bool {
         let checks = [
@@ -315,13 +288,5 @@ mod tests {
         board.place_tile(7, 7, Tile::new('A'));
         assert!(!board.is_empty(7, 7));
         assert_eq!(board.get_tile(7, 7).unwrap().letter, 'A');
-    }
-
-    #[test]
-    fn test_anchors_first_turn() {
-        let board = Board::new();
-        let anchors = board.get_anchors();
-        assert_eq!(anchors.len(), 1);
-        assert_eq!(anchors[0], (7, 7));
     }
 }
