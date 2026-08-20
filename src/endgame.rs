@@ -131,7 +131,6 @@ impl<'a> EndgameSolver<'a> {
             let mut new_board = board.clone();
             for (r, c, tile) in &mv.tiles_used {
                 new_board.place_tile(*r, *c, *tile);
-                new_board.mark_premium_used(*r, *c);
             }
 
             let opp_solver = Solver::new(&new_board, self.dictionary);
@@ -214,9 +213,6 @@ mod tests {
         board.place_tile(7, 7, Tile::new('C'));
         board.place_tile(7, 8, Tile::new('A'));
         board.place_tile(7, 9, Tile::new('T'));
-        board.mark_premium_used(7, 7);
-        board.mark_premium_used(7, 8);
-        board.mark_premium_used(7, 9);
         board
     }
 

@@ -82,9 +82,6 @@ fn test_endgame_solve_flow() {
     board.place_tile(7, 7, Tile::new('C'));
     board.place_tile(7, 8, Tile::new('A'));
     board.place_tile(7, 9, Tile::new('T'));
-    board.mark_premium_used(7, 7);
-    board.mark_premium_used(7, 8);
-    board.mark_premium_used(7, 9);
 
     let our_rack = vec![Tile::new('S'), Tile::new('E')];
     let opp_rack = vec![Tile::new('R'), Tile::new('D')];

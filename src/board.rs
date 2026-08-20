@@ -64,8 +64,6 @@ impl Direction {
 pub struct Cell {
     pub tile: Option<Tile>,
     pub premium: Premium,
-    /// True if the premium was used (tile was placed here this turn or previously)
-    pub premium_used: bool,
 }
 
 impl Cell {
@@ -73,7 +71,6 @@ impl Cell {
         Cell {
             tile: None,
             premium,
-            premium_used: false,
         }
     }
 
@@ -223,13 +220,6 @@ impl Board {
             cell.tile.take()
         } else {
             None
-        }
-    }
-
-    /// Mark the premium at a position as used
-    pub fn mark_premium_used(&mut self, row: usize, col: usize) {
-        if let Some(cell) = self.get_mut(row, col) {
-            cell.premium_used = true;
         }
     }
 

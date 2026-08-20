@@ -2,31 +2,30 @@
 //!
 //! Generates all legal moves for a given rack and board position,
 //! scoring each move and evaluating leave quality for equity ranking.
+//!
+//! The search walks the dictionary FST one node at a time: every placed
+//! letter is a single transition lookup, and blanks enumerate the node's
+//! outgoing transitions rather than all 26 letters. Cross-checks are
+//! precomputed bitmasks, and scores accumulate incrementally during the
+//! search so recording a move is allocation-light.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::board::{Board, Direction, BOARD_SIZE};
+use fst::raw::Node;
+
+use crate::board::{Board, Direction, Premium, BOARD_SIZE};
 use crate::dictionary::Dictionary;
-use crate::tile::{Rack, Tile, RACK_SIZE};
-
-/// Pre-computed cross-check sets for every empty square on the board.
-///
-/// For each empty position `(row, col)`, stores which letters are valid
-/// when placing a tile in the horizontal direction (vertical cross-check)
-/// and in the vertical direction (horizontal cross-check). Computing these
-/// once per `find_moves()` call avoids redundant dictionary lookups when
-/// the same square is visited from multiple anchors or prefix lengths.
-struct CrossCheckCache {
-    /// Cross-checks for tiles placed as part of a horizontal word
-    /// (constraints from vertical neighbors)
-    horizontal: HashMap<(usize, usize), HashSet<char>>,
-    /// Cross-checks for tiles placed as part of a vertical word
-    /// (constraints from horizontal neighbors)
-    vertical: HashMap<(usize, usize), HashSet<char>>,
-}
+use crate::game::TOTAL_TILES;
+use crate::tile::{letter_value, Rack, Tile, RACK_SIZE};
 
 /// Bonus points awarded when a player uses all tiles from their rack in a single turn.
 pub(crate) const BINGO_BONUS: u32 = 40;
+
+/// Bitmask with every letter A–Z allowed.
+const ALL_LETTERS: u32 = (1 << 26) - 1;
+
+/// Index of the blank in the rack count array.
+const BLANK_IDX: usize = 26;
 
 /// A potential move that can be played
 #[derive(Debug, Clone)]
@@ -111,13 +110,10 @@ impl Move {
                 }
                 None => {
                     // Can't find required tile - try using a blank as fallback
-                    if let Some(idx) = rack_remaining.iter().position(|t| t.is_blank) {
-                        let mut tile = rack_remaining.remove(idx);
-                        tile.letter = letter;
-                        tiles_used.push((r, c, tile));
-                    } else {
-                        return None; // Can't construct this move
-                    }
+                    let idx = rack_remaining.iter().position(|t| t.is_blank)?;
+                    let mut tile = rack_remaining.remove(idx);
+                    tile.letter = letter;
+                    tiles_used.push((r, c, tile));
                 }
             }
         }
@@ -135,6 +131,16 @@ impl Move {
             leave: rack_remaining,
             equity,
         })
+    }
+
+    /// Board coordinates in the conventional notation: row number first for
+    /// horizontal plays (`8D`), column letter first for vertical plays (`D8`).
+    pub fn coords(&self) -> String {
+        let col_letter = (b'A' + self.col as u8) as char;
+        match self.direction {
+            Direction::Horizontal => format!("{}{}", self.row + 1, col_letter),
+            Direction::Vertical => format!("{}{}", col_letter, self.row + 1),
+        }
     }
 }
 
@@ -156,15 +162,15 @@ pub fn leave_value_with_phase(leave: &[Tile], unseen_count: Option<usize>) -> f3
 
     // Phase multiplier: leave matters less as the game ends
     let phase_scale = match unseen_count {
-        Some(n) if n <= 7 => 0.25,  // Endgame: leave barely matters
-        Some(n) if n <= 14 => 0.6,  // Pre-endgame: leave somewhat matters
-        _ => 1.0,                    // Early/mid/late: full weight
+        Some(n) if n <= 7 => 0.25, // Endgame: leave barely matters
+        Some(n) if n <= 14 => 0.6, // Pre-endgame: leave somewhat matters
+        _ => 1.0,                  // Early/mid/late: full weight
     };
 
     let mut value = 0.0;
-    let mut vowels = 0;
-    let mut consonants = 0;
-    let mut letter_counts: HashMap<char, i32> = HashMap::new();
+    let mut vowels: i32 = 0;
+    let mut consonants: i32 = 0;
+    let mut counts = [0i32; 26];
 
     for tile in leave {
         if tile.is_blank {
@@ -175,7 +181,9 @@ pub fn leave_value_with_phase(leave: &[Tile], unseen_count: Option<usize>) -> f3
         }
 
         let letter = tile.letter;
-        *letter_counts.entry(letter).or_insert(0) += 1;
+        if let Some(idx) = letter_index(letter) {
+            counts[idx] += 1;
+        }
 
         // Individual letter values calibrated for Crossplay.
         // These approximate the expected equity contribution of having each
@@ -219,10 +227,10 @@ pub fn leave_value_with_phase(leave: &[Tile], unseen_count: Option<usize>) -> f3
     }
 
     // Penalize duplicate tiles (diminishing returns on same letter)
-    for (letter, count) in &letter_counts {
-        if *count >= 2 {
-            let extra = (*count - 1) as f32;
-            let penalty = match letter {
+    for (idx, &count) in counts.iter().enumerate() {
+        if count >= 2 {
+            let extra = (count - 1) as f32;
+            let penalty = match (b'A' + idx as u8) as char {
                 // Common tiles: duplicates are less painful
                 'E' => 2.5 * extra,
                 'A' | 'I' | 'O' => 3.0 * extra,
@@ -237,7 +245,7 @@ pub fn leave_value_with_phase(leave: &[Tile], unseen_count: Option<usize>) -> f3
     }
 
     // Penalize vowel/consonant imbalance
-    let total_letters = (vowels + consonants) as i32;
+    let total_letters = vowels + consonants;
     if total_letters > 1 {
         // Ideal ratio is ~40% vowels for bingo potential
         let ideal_vowels = (total_letters as f32 * 0.4).round() as i32;
@@ -250,15 +258,14 @@ pub fn leave_value_with_phase(leave: &[Tile], unseen_count: Option<usize>) -> f3
         }
     }
 
+    let has = |c: char| counts[(c as u8 - b'A') as usize] > 0;
+
     // Q without U is very bad
-    if letter_counts.get(&'Q').copied().unwrap_or(0) > 0
-        && letter_counts.get(&'U').copied().unwrap_or(0) == 0
-    {
+    if has('Q') && !has('U') {
         value -= 12.0;
     }
 
     // Synergy bonuses for bingo-friendly combinations
-    let has = |c: char| letter_counts.get(&c).copied().unwrap_or(0) > 0;
     if has('I') && has('N') && has('G') {
         value += 3.0; // -ING is a powerful bingo ending
     }
@@ -270,6 +277,22 @@ pub fn leave_value_with_phase(leave: &[Tile], unseen_count: Option<usize>) -> f3
     }
 
     value * phase_scale
+}
+
+/// Index 0–25 for an uppercase ASCII letter, `None` otherwise.
+#[inline]
+fn letter_index(letter: char) -> Option<usize> {
+    let b = letter as u32;
+    if (b'A' as u32..=b'Z' as u32).contains(&b) {
+        Some((b - b'A' as u32) as usize)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn index_letter(idx: usize) -> char {
+    (b'A' + idx as u8) as char
 }
 
 /// Configuration for the solver
@@ -293,6 +316,68 @@ pub struct Solver<'a> {
     config: SolverConfig,
 }
 
+/// Board-derived tables that depend only on the position, not the rack.
+///
+/// Indexed `[direction][row][col]` where direction 0 = horizontal word,
+/// 1 = vertical word (the cross-check constrains the perpendicular word).
+struct BoardInfo {
+    /// Allowed letters (bit `i` = letter `A + i`) for a tile placed here as
+    /// part of a word in the given direction.
+    cross_mask: [[[u32; BOARD_SIZE]; BOARD_SIZE]; 2],
+    /// Sum of existing tile values in the perpendicular word through this
+    /// square (0 when there is no perpendicular word).
+    cross_score: [[[u32; BOARD_SIZE]; BOARD_SIZE]; 2],
+    /// Whether placing here forms a perpendicular word at all.
+    cross_has: [[[bool; BOARD_SIZE]; BOARD_SIZE]; 2],
+    /// Empty squares adjacent to a tile (or the centre on the first turn).
+    anchor: [[bool; BOARD_SIZE]; BOARD_SIZE],
+    /// Number of tiles on the board (for game-phase estimation).
+    tile_count: usize,
+}
+
+#[inline]
+fn dir_index(dir: Direction) -> usize {
+    match dir {
+        Direction::Horizontal => 0,
+        Direction::Vertical => 1,
+    }
+}
+
+/// A tile placed during generation: position along the lane, letter index,
+/// and whether it came from a blank.
+#[derive(Clone, Copy)]
+struct Placed {
+    pos: usize,
+    letter: usize,
+    is_blank: bool,
+}
+
+/// Mutable search state for one `find_moves` call.
+struct Gen<'s, 'a> {
+    solver: &'s Solver<'a>,
+    info: &'s BoardInfo,
+    dir: Direction,
+    di: usize,
+    /// Row (horizontal) or column (vertical) being searched.
+    lane: usize,
+    /// Position of the anchor along the lane.
+    anchor_pos: usize,
+    /// Position of the first letter of the main word (set once the left
+    /// part is attached to the board).
+    word_start: usize,
+    /// Remaining rack: counts per letter, blanks at index 26.
+    rack: [u8; 27],
+    rack_len: usize,
+    /// Letters of the main word so far (indices 0–25).
+    word: [u8; BOARD_SIZE],
+    word_len: usize,
+    placed: [Placed; RACK_SIZE],
+    placed_len: usize,
+    /// Unseen tile count (bag + opponent rack) for leave phase scaling.
+    unseen: usize,
+    moves: &'s mut Vec<Move>,
+}
+
 impl<'a> Solver<'a> {
     pub fn new(board: &'a Board, dictionary: &'a Dictionary) -> Self {
         Solver {
@@ -302,45 +387,89 @@ impl<'a> Solver<'a> {
         }
     }
 
-    /// Generate all valid moves for the given rack
+    /// Generate all valid moves for the given rack, sorted by equity.
+    ///
+    /// Every distinct tile placement appears exactly once. Single-tile plays
+    /// that form words in both directions are reported once, labelled with
+    /// the longer word.
     pub fn find_moves(&self, rack: &Rack) -> Vec<Move> {
-        let mut moves = Vec::new();
-
-        // Pre-compute cross-checks for all empty squares.
-        // This is a major optimization: each square's cross-checks depend only
-        // on the board state (not the rack), so computing them once eliminates
-        // redundant dictionary lookups when the same position is visited from
-        // multiple anchors or prefix lengths.
-        let cache = self.precompute_cross_checks();
-
-        // Get all anchor squares
-        let anchors = self.board.get_anchors();
-
-        // For each anchor, try to generate moves in both directions
-        for (anchor_row, anchor_col) in anchors {
-            // Try horizontal moves
-            self.generate_moves_at_anchor(
-                anchor_row,
-                anchor_col,
-                Direction::Horizontal,
-                rack,
-                &cache,
-                &mut moves,
-            );
-
-            // Try vertical moves
-            self.generate_moves_at_anchor(
-                anchor_row,
-                anchor_col,
-                Direction::Vertical,
-                rack,
-                &cache,
-                &mut moves,
-            );
+        let tiles = rack.tiles();
+        if tiles.is_empty() {
+            return Vec::new();
         }
 
-        // Remove duplicates and sort by score
-        self.deduplicate_and_sort(&mut moves);
+        let info = self.analyze_board();
+        let unseen = TOTAL_TILES.saturating_sub(info.tile_count + tiles.len());
+
+        let mut counts = [0u8; 27];
+        for t in &tiles {
+            if t.is_blank {
+                counts[BLANK_IDX] += 1;
+            } else if let Some(idx) = letter_index(t.letter) {
+                counts[idx] += 1;
+            }
+        }
+
+        let mut moves = Vec::new();
+        let mut gen = Gen {
+            solver: self,
+            info: &info,
+            dir: Direction::Horizontal,
+            di: 0,
+            lane: 0,
+            anchor_pos: 0,
+            word_start: 0,
+            rack: counts,
+            rack_len: tiles.len(),
+            word: [0; BOARD_SIZE],
+            word_len: 0,
+            placed: [Placed {
+                pos: 0,
+                letter: 0,
+                is_blank: false,
+            }; RACK_SIZE],
+            placed_len: 0,
+            unseen,
+            moves: &mut moves,
+        };
+
+        // On the first turn the board is symmetric, so every vertical play
+        // mirrors a horizontal one; list only horizontal plays.
+        let directions: &[Direction] = if info.tile_count == 0 {
+            &[Direction::Horizontal]
+        } else {
+            &[Direction::Horizontal, Direction::Vertical]
+        };
+
+        for row in 0..BOARD_SIZE {
+            for col in 0..BOARD_SIZE {
+                if !info.anchor[row][col] {
+                    continue;
+                }
+                for &dir in directions {
+                    gen.dir = dir;
+                    gen.di = dir_index(dir);
+                    let (lane, pos) = match dir {
+                        Direction::Horizontal => (row, col),
+                        Direction::Vertical => (col, row),
+                    };
+                    gen.lane = lane;
+                    gen.anchor_pos = pos;
+                    gen.generate_at_anchor();
+                }
+            }
+        }
+
+        Self::dedup_single_tile_plays(&mut moves);
+
+        // Sort by equity descending (strategic value = score + leave value),
+        // breaking ties by raw score so the order is stable across runs.
+        moves.sort_by(|a, b| {
+            b.equity
+                .partial_cmp(&a.equity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.score.cmp(&a.score))
+        });
 
         moves
     }
@@ -350,600 +479,656 @@ impl<'a> Solver<'a> {
     /// This is the public entry point for scoring externally-detected moves
     /// (e.g., opponent tiles placed by the user). The board should be the
     /// state BEFORE the tiles were placed (so premiums are still available).
-    pub fn score_placed_tiles(
-        &self,
-        placed_tiles: &[(usize, usize, Tile)],
-        dir: Direction,
-    ) -> u32 {
-        self.calculate_move_score(placed_tiles, dir)
-    }
-
-    /// Pre-compute cross-check sets for every empty square on the board.
-    fn precompute_cross_checks(&self) -> CrossCheckCache {
-        let all_letters: HashSet<char> = ('A'..='Z').collect();
-        let mut horizontal = HashMap::new();
-        let mut vertical = HashMap::new();
-
-        for row in 0..BOARD_SIZE {
-            for col in 0..BOARD_SIZE {
-                if !self.board.is_empty(row, col) {
-                    continue;
-                }
-                // For horizontal words: check vertical (perpendicular) constraints
-                horizontal.insert(
-                    (row, col),
-                    self.compute_cross_check_at(row, col, Direction::Vertical, &all_letters),
-                );
-                // For vertical words: check horizontal (perpendicular) constraints
-                vertical.insert(
-                    (row, col),
-                    self.compute_cross_check_at(row, col, Direction::Horizontal, &all_letters),
-                );
-            }
+    /// `placed_tiles` must be in word order along `dir`.
+    pub fn score_placed_tiles(&self, placed_tiles: &[(usize, usize, Tile)], dir: Direction) -> u32 {
+        if placed_tiles.is_empty() {
+            return 0;
         }
+        let (dr, dc) = dir.delta();
 
-        CrossCheckCache {
-            horizontal,
-            vertical,
-        }
-    }
-
-    /// Compute which letters are valid at a position given perpendicular constraints.
-    fn compute_cross_check_at(
-        &self,
-        row: usize,
-        col: usize,
-        cross_dir: Direction,
-        all_letters: &HashSet<char>,
-    ) -> HashSet<char> {
-        let (dr, dc) = cross_dir.delta();
-
-        // Find letters already above/left in the cross direction
-        let mut prefix = String::new();
-        let mut r = row as i32 - dr;
-        let mut c = col as i32 - dc;
-        while Board::is_valid_position(r, c) {
-            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
-                prefix.insert(0, tile.letter);
-                r -= dr;
-                c -= dc;
+        // Walk back from the first placed tile over existing tiles to the
+        // true start of the main word.
+        let (mut r, mut c, _) = placed_tiles[0];
+        loop {
+            let pr = r as i32 - dr;
+            let pc = c as i32 - dc;
+            if Board::is_valid_position(pr, pc)
+                && self.board.get_tile(pr as usize, pc as usize).is_some()
+            {
+                r = pr as usize;
+                c = pc as usize;
             } else {
                 break;
             }
         }
 
-        // Find letters already below/right in the cross direction
-        let mut suffix = String::new();
+        let mut main_sum = 0;
+        let mut word_mult = 1;
+        let mut cross_total = 0;
+        let mut ri = r as i32;
+        let mut ci = c as i32;
+        while Board::is_valid_position(ri, ci) {
+            let (ur, uc) = (ri as usize, ci as usize);
+            if let Some(&(_, _, tile)) = placed_tiles
+                .iter()
+                .find(|(pr, pc, _)| *pr == ur && *pc == uc)
+            {
+                let premium = self.premium_at(ur, uc);
+                let lm = premium.letter_multiplier();
+                let wm = premium.word_multiplier();
+                main_sum += tile.value() * lm;
+                word_mult *= wm;
+                cross_total +=
+                    self.cross_word_score(ur, uc, tile.value() * lm, wm, dir.perpendicular());
+            } else if let Some(tile) = self.board.get_tile(ur, uc) {
+                main_sum += tile.value();
+            } else {
+                break;
+            }
+            ri += dr;
+            ci += dc;
+        }
+
+        let mut score = main_sum * word_mult + cross_total;
+        if placed_tiles.len() == RACK_SIZE {
+            score += self.config.bingo_bonus;
+        }
+        score
+    }
+
+    /// Premium of a square as it applies to a tile placed there now.
+    #[inline]
+    fn premium_at(&self, row: usize, col: usize) -> Premium {
+        self.board
+            .get(row, col)
+            .map(|c| c.premium)
+            .unwrap_or(Premium::Normal)
+    }
+
+    /// Score of the perpendicular word formed by placing a tile worth
+    /// `placed_value` (already letter-multiplied) at (row, col), or 0 if
+    /// there is no perpendicular word.
+    fn cross_word_score(
+        &self,
+        row: usize,
+        col: usize,
+        placed_value: u32,
+        word_mult: u32,
+        cross_dir: Direction,
+    ) -> u32 {
+        let (dr, dc) = cross_dir.delta();
+        let mut sum = 0;
+        let mut found = false;
+
+        let mut r = row as i32 - dr;
+        let mut c = col as i32 - dc;
+        while Board::is_valid_position(r, c) {
+            match self.board.get_tile(r as usize, c as usize) {
+                Some(t) => {
+                    sum += t.value();
+                    found = true;
+                    r -= dr;
+                    c -= dc;
+                }
+                None => break,
+            }
+        }
+
         let mut r = row as i32 + dr;
         let mut c = col as i32 + dc;
         while Board::is_valid_position(r, c) {
-            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
-                suffix.push(tile.letter);
-                r += dr;
-                c += dc;
-            } else {
-                break;
+            match self.board.get_tile(r as usize, c as usize) {
+                Some(t) => {
+                    sum += t.value();
+                    found = true;
+                    r += dr;
+                    c += dc;
+                }
+                None => break,
             }
         }
 
-        // No adjacent tiles in cross direction → any letter is valid
-        if prefix.is_empty() && suffix.is_empty() {
-            return all_letters.clone();
-        }
-
-        // Find all letters that form valid cross words
-        let mut valid = HashSet::new();
-        for letter in 'A'..='Z' {
-            let cross_word = format!("{}{}{}", prefix, letter, suffix);
-            if self.dictionary.is_valid(&cross_word) {
-                valid.insert(letter);
-            }
-        }
-        valid
-    }
-
-    fn generate_moves_at_anchor(
-        &self,
-        anchor_row: usize,
-        anchor_col: usize,
-        dir: Direction,
-        rack: &Rack,
-        cache: &CrossCheckCache,
-        moves: &mut Vec<Move>,
-    ) {
-        let (dr, dc) = dir.delta();
-
-        // First, collect any existing tiles BEFORE the anchor as a prefix
-        let mut existing_prefix = String::new();
-        let mut r = anchor_row as i32 - dr;
-        let mut c = anchor_col as i32 - dc;
-
-        while Board::is_valid_position(r, c) {
-            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
-                existing_prefix.insert(0, tile.letter);
-                r -= dr;
-                c -= dc;
-            } else {
-                break;
-            }
-        }
-
-        // If there's an existing prefix, we can only extend from this anchor
-        // (no room to place tiles before the existing word)
-        if !existing_prefix.is_empty() {
-            // Check if this prefix is valid before proceeding
-            if self.dictionary.has_prefix(&existing_prefix) {
-                let mut available_tiles: Vec<Tile> = rack.tiles().to_vec();
-                let mut placed_tiles: Vec<(usize, usize, Tile)> = Vec::new();
-                self.extend_right(
-                    anchor_row,
-                    anchor_col,
-                    dir,
-                    existing_prefix,
-                    &mut available_tiles,
-                    &mut placed_tiles,
-                    cache,
-                    moves,
-                );
-            }
+        if found {
+            (sum + placed_value) * word_mult
         } else {
-            // No existing tiles before anchor - try all possible prefix lengths
-            let max_prefix_len = self.calculate_prefix_limit(anchor_row, anchor_col, dir);
-
-            for prefix_len in 0..=max_prefix_len {
-                let start_row = (anchor_row as i32 - dr * prefix_len as i32) as usize;
-                let start_col = (anchor_col as i32 - dc * prefix_len as i32) as usize;
-
-                let mut available_tiles: Vec<Tile> = rack.tiles().to_vec();
-                let mut placed_tiles: Vec<(usize, usize, Tile)> = Vec::new();
-                self.extend_right(
-                    start_row,
-                    start_col,
-                    dir,
-                    String::new(),
-                    &mut available_tiles,
-                    &mut placed_tiles,
-                    cache,
-                    moves,
-                );
-            }
+            0
         }
     }
 
-    fn calculate_prefix_limit(&self, row: usize, col: usize, dir: Direction) -> usize {
-        let (dr, dc) = dir.delta();
-        let mut limit = 0;
+    /// Build the rack-independent tables: anchors and per-square cross-checks.
+    fn analyze_board(&self) -> BoardInfo {
+        let mut info = BoardInfo {
+            cross_mask: [[[ALL_LETTERS; BOARD_SIZE]; BOARD_SIZE]; 2],
+            cross_score: [[[0; BOARD_SIZE]; BOARD_SIZE]; 2],
+            cross_has: [[[false; BOARD_SIZE]; BOARD_SIZE]; 2],
+            anchor: [[false; BOARD_SIZE]; BOARD_SIZE],
+            tile_count: 0,
+        };
+
+        for row in 0..BOARD_SIZE {
+            for col in 0..BOARD_SIZE {
+                if self.board.get_tile(row, col).is_some() {
+                    info.tile_count += 1;
+                }
+            }
+        }
+
+        if info.tile_count == 0 {
+            info.anchor[BOARD_SIZE / 2][BOARD_SIZE / 2] = true;
+            return info;
+        }
+
+        for row in 0..BOARD_SIZE {
+            for col in 0..BOARD_SIZE {
+                if self.board.get_tile(row, col).is_some() {
+                    continue;
+                }
+                if !self.board.has_adjacent_tile(row, col) {
+                    continue;
+                }
+                info.anchor[row][col] = true;
+                for dir in [Direction::Horizontal, Direction::Vertical] {
+                    let di = dir_index(dir);
+                    let (mask, score, has) = self.cross_check(row, col, dir.perpendicular());
+                    info.cross_mask[di][row][col] = mask;
+                    info.cross_score[di][row][col] = score;
+                    info.cross_has[di][row][col] = has;
+                }
+            }
+        }
+
+        info
+    }
+
+    /// Compute which letters can be placed at (row, col) given the existing
+    /// tiles before and after it along `cross_dir`. Returns the allowed
+    /// letter mask, the sum of the neighbouring tile values, and whether a
+    /// perpendicular word exists at all.
+    fn cross_check(&self, row: usize, col: usize, cross_dir: Direction) -> (u32, u32, bool) {
+        let (dr, dc) = cross_dir.delta();
+
+        let mut prefix = [0u8; BOARD_SIZE];
+        let mut prefix_len = 0;
+        let mut score = 0;
         let mut r = row as i32 - dr;
         let mut c = col as i32 - dc;
-
-        // Count empty squares before the anchor (not adjacent to other tiles)
         while Board::is_valid_position(r, c) {
-            let ur = r as usize;
-            let uc = c as usize;
+            match self.board.get_tile(r as usize, c as usize) {
+                Some(t) => {
+                    prefix[prefix_len] = t.letter as u8;
+                    prefix_len += 1;
+                    score += t.value();
+                    r -= dr;
+                    c -= dc;
+                }
+                None => break,
+            }
+        }
 
-            if !self.board.is_empty(ur, uc) {
+        let mut suffix = [0u8; BOARD_SIZE];
+        let mut suffix_len = 0;
+        let mut r = row as i32 + dr;
+        let mut c = col as i32 + dc;
+        while Board::is_valid_position(r, c) {
+            match self.board.get_tile(r as usize, c as usize) {
+                Some(t) => {
+                    suffix[suffix_len] = t.letter as u8;
+                    suffix_len += 1;
+                    score += t.value();
+                    r += dr;
+                    c += dc;
+                }
+                None => break,
+            }
+        }
+
+        if prefix_len == 0 && suffix_len == 0 {
+            return (ALL_LETTERS, 0, false);
+        }
+
+        // Walk the prefix (collected backwards) to its node.
+        let dict = self.dictionary;
+        let mut node = dict.root();
+        for i in (0..prefix_len).rev() {
+            match dict.child(node, prefix[i]) {
+                Some(n) => node = n,
+                None => return (0, score, true),
+            }
+        }
+
+        let mut mask = 0u32;
+        for t in node.transitions() {
+            let Some(idx) = letter_index(t.inp as char) else {
+                continue;
+            };
+            let mut n = dict.node_at(t.addr);
+            let mut ok = true;
+            for &b in &suffix[..suffix_len] {
+                match dict.child(n, b) {
+                    Some(next) => n = next,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && n.is_final() {
+                mask |= 1 << idx;
+            }
+        }
+
+        (mask, score, true)
+    }
+
+    /// Single-tile plays are generated once per direction when they form
+    /// both a horizontal and a vertical word. Keep one copy, preferring the
+    /// longer main word for display.
+    fn dedup_single_tile_plays(moves: &mut Vec<Move>) {
+        let mut best: HashMap<(usize, usize, char, bool), usize> = HashMap::new();
+        let mut keep = vec![true; moves.len()];
+        for (i, mv) in moves.iter().enumerate() {
+            if mv.tiles_used.len() != 1 {
+                continue;
+            }
+            let (r, c, t) = mv.tiles_used[0];
+            let key = (r, c, t.letter, t.is_blank);
+            match best.get(&key) {
+                Some(&j) => {
+                    if moves[j].word.len() >= mv.word.len() {
+                        keep[i] = false;
+                    } else {
+                        keep[j] = false;
+                        best.insert(key, i);
+                    }
+                }
+                None => {
+                    best.insert(key, i);
+                }
+            }
+        }
+        if keep.iter().any(|k| !k) {
+            let mut idx = 0;
+            moves.retain(|_| {
+                let k = keep[idx];
+                idx += 1;
+                k
+            });
+        }
+    }
+}
+
+impl<'s, 'a> Gen<'s, 'a> {
+    #[inline]
+    fn rc(&self, pos: usize) -> (usize, usize) {
+        match self.dir {
+            Direction::Horizontal => (self.lane, pos),
+            Direction::Vertical => (pos, self.lane),
+        }
+    }
+
+    #[inline]
+    fn tile_at(&self, pos: usize) -> Option<&'a Tile> {
+        let (r, c) = self.rc(pos);
+        self.solver.board.get_tile(r, c)
+    }
+
+    fn generate_at_anchor(&mut self) {
+        let dict = self.solver.dictionary;
+        let anchor = self.anchor_pos;
+
+        if anchor > 0 && self.tile_at(anchor - 1).is_some() {
+            // Tiles immediately before the anchor form a fixed prefix: the
+            // word must start at the beginning of that run.
+            let mut start = anchor - 1;
+            while start > 0 && self.tile_at(start - 1).is_some() {
+                start -= 1;
+            }
+            let mut node = dict.root();
+            let mut sum = 0;
+            self.word_len = 0;
+            for pos in start..anchor {
+                let tile = self.tile_at(pos).expect("run of existing tiles");
+                match dict.child(node, tile.letter as u8) {
+                    Some(n) => node = n,
+                    None => {
+                        // Existing tiles are not a prefix of any word; no
+                        // extension is possible from this anchor.
+                        self.word_len = 0;
+                        return;
+                    }
+                }
+                self.word[self.word_len] = letter_index(tile.letter).unwrap_or(0) as u8;
+                self.word_len += 1;
+                sum += tile.value();
+            }
+            self.word_start = start;
+            self.extend_right(node, anchor, sum, 1, 0);
+            self.word_len = 0;
+            return;
+        }
+
+        // No tile before the anchor: build left parts over the run of empty,
+        // non-anchor squares to the left. Squares further left belong to
+        // another anchor and will be covered from there.
+        let mut limit = 0;
+        let mut pos = anchor;
+        while pos > 0 {
+            pos -= 1;
+            let (r, c) = self.rc(pos);
+            if self.tile_at(pos).is_some() || self.info.anchor[r][c] {
                 break;
             }
-
-            // Check if this square is already an anchor (adjacent to another tile)
-            if self.board.has_adjacent_tile(ur, uc) {
-                break;
-            }
-
             limit += 1;
-            r -= dr;
-            c -= dc;
         }
+        let limit = limit.min(self.rack_len.saturating_sub(1));
 
-        // Limit by rack size
-        limit.min(RACK_SIZE)
+        self.word_len = 0;
+        self.placed_len = 0;
+        self.left_part(dict.root(), limit);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn extend_right(
-        &self,
-        row: usize,
-        col: usize,
-        dir: Direction,
-        current_word: String,
-        available_tiles: &mut Vec<Tile>,
-        placed_tiles: &mut Vec<(usize, usize, Tile)>,
-        cache: &CrossCheckCache,
-        moves: &mut Vec<Move>,
-    ) {
-        let (dr, dc) = dir.delta();
+    /// Recursively build left parts (tiles placed before the anchor), and for
+    /// each one — including the empty left part — extend rightwards from
+    /// the anchor.
+    fn left_part(&mut self, node: Node<'a>, limit: usize) {
+        self.attach_left_part_and_extend(node);
 
-        // If we've gone off the board, check if we have a valid word
-        if !Board::is_valid_position(row as i32, col as i32) {
-            if current_word.len() >= 2
-                && self.dictionary.is_valid(&current_word)
-                && !placed_tiles.is_empty()
-            {
-                self.record_move(dir, &current_word, placed_tiles, available_tiles, moves);
-            }
+        if limit == 0 {
             return;
         }
 
-        // Check if there's already a tile here
-        if let Some(existing_tile) = self.board.get_tile(row, col) {
-            // Use the existing tile
-            let mut new_word = current_word.clone();
-            new_word.push(existing_tile.letter);
-
-            // Check if this prefix is valid
-            if self.dictionary.has_prefix(&new_word) {
-                let next_row = (row as i32 + dr) as usize;
-                let next_col = (col as i32 + dc) as usize;
-
-                self.extend_right(
-                    next_row,
-                    next_col,
-                    dir,
-                    new_word,
-                    available_tiles,
-                    placed_tiles,
-                    cache,
-                    moves,
-                );
-            }
-        } else {
-            // Look up pre-computed cross-checks for this position and direction
-            let cross_checks_map = match dir {
-                Direction::Horizontal => &cache.horizontal,
-                Direction::Vertical => &cache.vertical,
+        let dict = self.solver.dictionary;
+        for t in node.transitions() {
+            let Some(idx) = letter_index(t.inp as char) else {
+                continue;
             };
-            let all_letters: HashSet<char> = ('A'..='Z').collect();
-            let cross_checks = cross_checks_map
-                .get(&(row, col))
-                .unwrap_or(&all_letters);
-
-            // First, check if the current word is complete (valid word that touches existing tiles)
-            if current_word.len() >= 2
-                && self.dictionary.is_valid(&current_word)
-                && !placed_tiles.is_empty()
-            {
-                // Make sure we've connected to existing tiles
-                let connects = placed_tiles.iter().any(|(r, c, _)| {
-                    self.board.has_adjacent_tile(*r, *c)
-                        || (*r == 7 && *c == 7 && self.board.is_first_turn())
-                });
-
-                if connects {
-                    self.record_move(dir, &current_word, placed_tiles, available_tiles, moves);
-                }
-            }
-
-            // Build iteration order: non-blank tiles first, then blanks.
-            //
-            // This is critical for completeness: placing a regular tile at the
-            // current position keeps the blank available for later positions,
-            // where it can represent ANY letter. This explores a strict superset
-            // of plays compared to committing the blank here. With non-blanks
-            // first, the tried_letters set correctly prunes blank-as-X when
-            // regular X was already tried (since that path is strictly better).
-            let tile_indices: Vec<usize> = {
-                let mut non_blank: Vec<usize> = Vec::new();
-                let mut blank: Vec<usize> = Vec::new();
-                for idx in 0..available_tiles.len() {
-                    if available_tiles[idx].is_blank {
-                        blank.push(idx);
-                    } else {
-                        non_blank.push(idx);
-                    }
-                }
-                non_blank.extend(blank);
-                non_blank
-            };
-
-            let mut tried_letters = HashSet::new();
-            for &i in &tile_indices {
-                let tile = &available_tiles[i];
-                let letters_to_try: Vec<char> = if tile.is_blank {
-                    ('A'..='Z').collect()
-                } else {
-                    vec![tile.letter]
-                };
-
-                for letter in letters_to_try {
-                    // Skip if we've already tried this letter at this position.
-                    // Safe because non-blank tiles are iterated first: if regular X
-                    // was tried, blank-as-X is redundant (regular X path keeps the
-                    // blank for future positions, exploring a superset of plays).
-                    if tried_letters.contains(&letter) {
-                        continue;
-                    }
-
-                    // Skip if this letter doesn't pass cross-checks
-                    if !cross_checks.contains(&letter) {
-                        continue;
-                    }
-
-                    let mut new_word = current_word.clone();
-                    new_word.push(letter);
-
-                    // Check if this prefix is valid
-                    if !self.dictionary.has_prefix(&new_word) {
-                        continue;
-                    }
-
-                    tried_letters.insert(letter);
-
-                    // In-place backtracking: remove tile, recurse, restore
-                    let used_tile = available_tiles.swap_remove(i);
-                    let placed_tile = if used_tile.is_blank {
-                        Tile::blank(letter)
-                    } else {
-                        used_tile
-                    };
-                    placed_tiles.push((row, col, placed_tile));
-
-                    let next_row = (row as i32 + dr) as usize;
-                    let next_col = (col as i32 + dc) as usize;
-
-                    self.extend_right(
-                        next_row,
-                        next_col,
-                        dir,
-                        new_word,
-                        available_tiles,
-                        placed_tiles,
-                        cache,
-                        moves,
-                    );
-
-                    // Undo: restore state
-                    placed_tiles.pop();
-                    // Restore the tile to its original position:
-                    // swap_remove(i) moved the last element to position i,
-                    // so we push the used tile back and swap it into position i.
-                    available_tiles.push(used_tile);
-                    let last = available_tiles.len() - 1;
-                    available_tiles.swap(i, last);
-                }
-            }
-        }
-    }
-
-    fn record_move(
-        &self,
-        dir: Direction,
-        word: &str,
-        placed_tiles: &[(usize, usize, Tile)],
-        leave: &[Tile],
-        moves: &mut Vec<Move>,
-    ) {
-        if placed_tiles.is_empty() {
-            return;
-        }
-
-        // Find the actual start position of the word
-        let (dr, dc) = dir.delta();
-        let (first_row, first_col, _) = placed_tiles[0];
-
-        // Go backwards to find the true start
-        let mut start_row = first_row as i32;
-        let mut start_col = first_col as i32;
-
-        while Board::is_valid_position(start_row - dr, start_col - dc) {
-            if self
-                .board
-                .get_tile((start_row - dr) as usize, (start_col - dc) as usize)
-                .is_some()
-            {
-                start_row -= dr;
-                start_col -= dc;
+            let is_blank = if self.rack[idx] > 0 {
+                false
+            } else if self.rack[BLANK_IDX] > 0 {
+                true
             } else {
-                break;
+                continue;
+            };
+            let take = if is_blank { BLANK_IDX } else { idx };
+            self.rack[take] -= 1;
+            self.word[self.word_len] = idx as u8;
+            self.word_len += 1;
+            self.placed[self.placed_len] = Placed {
+                pos: 0, // assigned when attached
+                letter: idx,
+                is_blank,
+            };
+            self.placed_len += 1;
+
+            self.left_part(dict.node_at(t.addr), limit - 1);
+
+            self.placed_len -= 1;
+            self.word_len -= 1;
+            self.rack[take] += 1;
+        }
+    }
+
+    /// Assign board squares to the current left part (it ends just before
+    /// the anchor), accumulate its score, and extend right from the anchor.
+    fn attach_left_part_and_extend(&mut self, node: Node<'a>) {
+        let len = self.placed_len;
+        let start = self.anchor_pos - len;
+        self.word_start = start;
+
+        let mut main_sum = 0;
+        let mut word_mult = 1;
+        for i in 0..len {
+            let pos = start + i;
+            self.placed[i].pos = pos;
+            let (r, c) = self.rc(pos);
+            let premium = self.solver.premium_at(r, c);
+            let value = if self.placed[i].is_blank {
+                0
+            } else {
+                letter_value(index_letter(self.placed[i].letter))
+            };
+            main_sum += value * premium.letter_multiplier();
+            word_mult *= premium.word_multiplier();
+            // Left-part squares are never anchors, so they have no
+            // perpendicular neighbours and contribute no cross-word score.
+        }
+
+        self.extend_right(node, self.anchor_pos, main_sum, word_mult, 0);
+    }
+
+    fn extend_right(
+        &mut self,
+        node: Node<'a>,
+        pos: usize,
+        main_sum: u32,
+        word_mult: u32,
+        cross_total: u32,
+    ) {
+        let dict = self.solver.dictionary;
+
+        if pos == BOARD_SIZE {
+            if node.is_final() && self.placed_len > 0 && self.word_len >= 2 {
+                self.record(main_sum * word_mult + cross_total);
+            }
+            return;
+        }
+
+        if let Some(tile) = self.tile_at(pos) {
+            if let Some(child) = dict.child(node, tile.letter as u8) {
+                self.word[self.word_len] = letter_index(tile.letter).unwrap_or(0) as u8;
+                self.word_len += 1;
+                self.extend_right(
+                    child,
+                    pos + 1,
+                    main_sum + tile.value(),
+                    word_mult,
+                    cross_total,
+                );
+                self.word_len -= 1;
+            }
+            return;
+        }
+
+        // Empty square: the word may end here (only once it covers the anchor).
+        if node.is_final() && self.placed_len > 0 && self.word_len >= 2 && pos > self.anchor_pos {
+            self.record(main_sum * word_mult + cross_total);
+        }
+
+        if self.placed_len == self.rack_len {
+            return;
+        }
+
+        let (r, c) = self.rc(pos);
+        let mask = self.info.cross_mask[self.di][r][c];
+        if mask == 0 {
+            return;
+        }
+        let has_cross = self.info.cross_has[self.di][r][c];
+        let cross_score = self.info.cross_score[self.di][r][c];
+        let premium = self.solver.premium_at(r, c);
+        let lm = premium.letter_multiplier();
+        let wm = premium.word_multiplier();
+
+        for t in node.transitions() {
+            let Some(idx) = letter_index(t.inp as char) else {
+                continue;
+            };
+            if mask & (1 << idx) == 0 {
+                continue;
+            }
+            // Prefer the real tile; fall back to a blank. Using the real tile
+            // first keeps the blank available for later squares, which
+            // explores a superset of plays; `record` fixes up which square
+            // gets the blank for the best score.
+            let is_blank = if self.rack[idx] > 0 {
+                false
+            } else if self.rack[BLANK_IDX] > 0 {
+                true
+            } else {
+                continue;
+            };
+            let take = if is_blank { BLANK_IDX } else { idx };
+            let value = if is_blank {
+                0
+            } else {
+                letter_value(index_letter(idx))
+            };
+            let placed_value = value * lm;
+            let new_cross = if has_cross {
+                cross_total + (cross_score + placed_value) * wm
+            } else {
+                cross_total
+            };
+
+            self.rack[take] -= 1;
+            self.word[self.word_len] = idx as u8;
+            self.word_len += 1;
+            self.placed[self.placed_len] = Placed {
+                pos,
+                letter: idx,
+                is_blank,
+            };
+            self.placed_len += 1;
+
+            self.extend_right(
+                dict.node_at(t.addr),
+                pos + 1,
+                main_sum + placed_value,
+                word_mult * wm,
+                new_cross,
+            );
+
+            self.placed_len -= 1;
+            self.word_len -= 1;
+            self.rack[take] += 1;
+        }
+    }
+
+    /// Record the current word as a move. `raw_score` excludes the bingo bonus.
+    fn record(&mut self, raw_score: u32) {
+        let n = self.placed_len;
+        let mut score = raw_score;
+        if n == RACK_SIZE {
+            score += self.solver.config.bingo_bonus;
+        }
+
+        // Work on a copy: the blank fix-up below may move blank flags between
+        // squares, and the live `self.placed` stack must stay in sync with
+        // the rack counts for the rest of the search.
+        let mut placed = self.placed;
+        if placed[..n].iter().any(|p| p.is_blank) {
+            let delta = self.optimize_blank_squares(&mut placed[..n]);
+            score = (score as i64 + delta).max(0) as u32;
+        }
+
+        let word: String = self.word[..self.word_len]
+            .iter()
+            .map(|&i| index_letter(i as usize))
+            .collect();
+
+        let tiles_used: Vec<(usize, usize, Tile)> = placed[..n]
+            .iter()
+            .map(|p| {
+                let (r, c) = self.rc(p.pos);
+                let letter = index_letter(p.letter);
+                let tile = if p.is_blank {
+                    Tile::blank(letter)
+                } else {
+                    Tile::new(letter)
+                };
+                (r, c, tile)
+            })
+            .collect();
+
+        let mut leave = Vec::with_capacity(self.rack_len - n);
+        for (idx, &count) in self.rack.iter().enumerate() {
+            for _ in 0..count {
+                if idx == BLANK_IDX {
+                    leave.push(Tile::blank(' '));
+                } else {
+                    leave.push(Tile::new(index_letter(idx)));
+                }
             }
         }
 
-        // Calculate score
-        let score = self.calculate_move_score(placed_tiles, dir);
+        let equity = score as f32 + leave_value_with_phase(&leave, Some(self.unseen));
+        let (row, col) = self.rc(self.word_start);
 
-        let is_bingo = placed_tiles.len() == RACK_SIZE;
-        let leave_val = leave_value(leave);
-        let equity = score as f32 + leave_val;
-
-        moves.push(Move {
-            word: word.to_string(),
-            row: start_row as usize,
-            col: start_col as usize,
-            direction: dir,
+        self.moves.push(Move {
+            word,
+            row,
+            col,
+            direction: self.dir,
             score,
-            tiles_used: placed_tiles.to_vec(),
-            is_bingo,
-            leave: leave.to_vec(),
+            tiles_used,
+            is_bingo: n == RACK_SIZE,
+            leave,
             equity,
         });
     }
 
-    fn calculate_move_score(&self, placed_tiles: &[(usize, usize, Tile)], dir: Direction) -> u32 {
-        let mut total_score = 0;
-
-        // Calculate main word score
-        let main_word_score = self.calculate_word_score(placed_tiles, dir);
-        total_score += main_word_score;
-
-        // Calculate cross word scores
-        for &(row, col, ref tile) in placed_tiles {
-            let cross_score = self.calculate_cross_word_score(row, col, tile, dir.perpendicular());
-            total_score += cross_score;
+    /// When a letter appears among the placed tiles both as a real tile and
+    /// as a blank, the search always committed the real tile to the earlier
+    /// square. Move the real tiles onto the squares where they score most
+    /// (updating `placed` in place) and return the score adjustment.
+    fn optimize_blank_squares(&self, placed: &mut [Placed]) -> i64 {
+        let n = placed.len();
+        let mut word_mult = 1;
+        for p in placed.iter() {
+            let (r, c) = self.rc(p.pos);
+            word_mult *= self.solver.premium_at(r, c).word_multiplier();
         }
 
-        // Add bingo bonus
-        if placed_tiles.len() == RACK_SIZE {
-            total_score += self.config.bingo_bonus;
-        }
-
-        total_score
-    }
-
-    fn calculate_word_score(&self, placed_tiles: &[(usize, usize, Tile)], dir: Direction) -> u32 {
-        let (dr, dc) = dir.delta();
-
-        // Find the full word boundaries
-        if placed_tiles.is_empty() {
-            return 0;
-        }
-
-        let (first_row, first_col, _) = placed_tiles[0];
-
-        // Find start of word
-        let mut start_row = first_row as i32;
-        let mut start_col = first_col as i32;
-
-        while Board::is_valid_position(start_row - dr, start_col - dc) {
-            if self
-                .board
-                .get_tile((start_row - dr) as usize, (start_col - dc) as usize)
-                .is_some()
-            {
-                start_row -= dr;
-                start_col -= dc;
-            } else {
-                break;
+        // Points gained per unit of letter value at each placed square.
+        let coef = |p: &Placed| -> u32 {
+            let (r, c) = self.rc(p.pos);
+            let premium = self.solver.premium_at(r, c);
+            let lm = premium.letter_multiplier();
+            let mut v = lm * word_mult;
+            if self.info.cross_has[self.di][r][c] {
+                v += lm * premium.word_multiplier();
             }
-        }
+            v
+        };
 
-        // Build a map of placed tiles for quick lookup
-        let placed_map: std::collections::HashMap<(usize, usize), &Tile> =
-            placed_tiles.iter().map(|(r, c, t)| ((*r, *c), t)).collect();
+        let mut delta = 0i64;
+        let mut handled = 0u32;
+        for i in 0..n {
+            let letter = placed[i].letter;
+            if handled & (1 << letter) != 0 {
+                continue;
+            }
+            handled |= 1 << letter;
 
-        let mut word_score = 0;
-        let mut word_multiplier = 1;
-
-        let mut r = start_row;
-        let mut c = start_col;
-
-        loop {
-            if !Board::is_valid_position(r, c) {
-                break;
+            let has_blank = placed.iter().any(|p| p.letter == letter && p.is_blank);
+            let has_real = placed.iter().any(|p| p.letter == letter && !p.is_blank);
+            if !(has_blank && has_real) {
+                continue;
             }
 
-            let ur = r as usize;
-            let uc = c as usize;
+            // Indices of all squares holding this letter, best coefficient
+            // first (stable, so ties keep the search's original assignment).
+            let mut idxs: Vec<usize> = (0..n).filter(|&j| placed[j].letter == letter).collect();
+            idxs.sort_by_key(|&j| std::cmp::Reverse(coef(&placed[j])));
+            let real_count = idxs.iter().filter(|&&j| !placed[j].is_blank).count();
+            let value = letter_value(index_letter(letter)) as i64;
 
-            let tile = if let Some(t) = placed_map.get(&(ur, uc)) {
-                Some(*t)
-            } else {
-                self.board.get_tile(ur, uc)
-            };
-
-            if let Some(tile) = tile {
-                let cell = self
-                    .board
-                    .get(ur, uc)
-                    .expect("board position within validated bounds");
-                let letter_value = tile.value();
-
-                // Only apply premium if we're placing a tile here
-                if placed_map.contains_key(&(ur, uc)) && !cell.premium_used {
-                    let letter_mult = cell.premium.letter_multiplier();
-                    let word_mult = cell.premium.word_multiplier();
-
-                    word_score += letter_value * letter_mult;
-                    word_multiplier *= word_mult;
-                } else {
-                    word_score += letter_value;
-                }
-
-                r += dr;
-                c += dc;
-            } else {
-                break;
+            let before: i64 = idxs
+                .iter()
+                .filter(|&&j| !placed[j].is_blank)
+                .map(|&j| coef(&placed[j]) as i64)
+                .sum();
+            let after: i64 = idxs[..real_count]
+                .iter()
+                .map(|&j| coef(&placed[j]) as i64)
+                .sum();
+            for (k, &j) in idxs.iter().enumerate() {
+                placed[j].is_blank = k >= real_count;
             }
+            delta += value * (after - before);
         }
 
-        word_score * word_multiplier
-    }
-
-    fn calculate_cross_word_score(
-        &self,
-        row: usize,
-        col: usize,
-        placed_tile: &Tile,
-        cross_dir: Direction,
-    ) -> u32 {
-        let (dr, dc) = cross_dir.delta();
-
-        // Check if there are adjacent tiles in the cross direction
-        let has_before = Board::is_valid_position(row as i32 - dr, col as i32 - dc)
-            && self
-                .board
-                .get_tile((row as i32 - dr) as usize, (col as i32 - dc) as usize)
-                .is_some();
-
-        let has_after = Board::is_valid_position(row as i32 + dr, col as i32 + dc)
-            && self
-                .board
-                .get_tile((row as i32 + dr) as usize, (col as i32 + dc) as usize)
-                .is_some();
-
-        if !has_before && !has_after {
-            return 0;
-        }
-
-        // Calculate cross word score
-        let cell = self
-            .board
-            .get(row, col)
-            .expect("board position within validated bounds");
-        let mut word_score = 0;
-        let mut word_multiplier = 1;
-
-        // Score tiles before
-        let mut r = row as i32 - dr;
-        let mut c = col as i32 - dc;
-
-        while Board::is_valid_position(r, c) {
-            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
-                word_score += tile.value();
-                r -= dr;
-                c -= dc;
-            } else {
-                break;
-            }
-        }
-
-        // Score the placed tile (with premium)
-        if !cell.premium_used {
-            word_score += placed_tile.value() * cell.premium.letter_multiplier();
-            word_multiplier = cell.premium.word_multiplier();
-        } else {
-            word_score += placed_tile.value();
-        }
-
-        // Score tiles after
-        let mut r = row as i32 + dr;
-        let mut c = col as i32 + dc;
-
-        while Board::is_valid_position(r, c) {
-            if let Some(tile) = self.board.get_tile(r as usize, c as usize) {
-                word_score += tile.value();
-                r += dr;
-                c += dc;
-            } else {
-                break;
-            }
-        }
-
-        word_score * word_multiplier
-    }
-
-    fn deduplicate_and_sort(&self, moves: &mut Vec<Move>) {
-        // Remove duplicates based on word + position + direction
-        let mut seen = HashSet::new();
-        moves.retain(|m| {
-            let key = (m.word.clone(), m.row, m.col, m.direction);
-            seen.insert(key)
-        });
-
-        // Sort by equity descending (strategic value = score + leave value)
-        moves.sort_by(|a, b| {
-            b.equity
-                .partial_cmp(&a.equity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        delta
     }
 }
 
@@ -951,6 +1136,7 @@ impl<'a> Solver<'a> {
 mod tests {
     use super::*;
     use crate::dictionary::load_default_dictionary;
+    use std::collections::HashSet;
 
     #[test]
     fn test_solver_first_turn() {
@@ -981,6 +1167,17 @@ mod tests {
         // Should find "CAT" since we have those letters
         let has_cat = moves.iter().any(|m| m.word == "CAT");
         assert!(has_cat, "Should find CAT as a valid move");
+
+        // Every first-turn move must cover the centre square.
+        for m in &moves {
+            assert!(
+                m.tiles_used.iter().any(|(r, c, _)| *r == 7 && *c == 7),
+                "{} at ({},{}) does not cover the centre",
+                m.word,
+                m.row,
+                m.col
+            );
+        }
     }
 
     #[test]
@@ -992,9 +1189,6 @@ mod tests {
         board.place_tile(7, 7, Tile::new('C'));
         board.place_tile(7, 8, Tile::new('A'));
         board.place_tile(7, 9, Tile::new('T'));
-        board.mark_premium_used(7, 7);
-        board.mark_premium_used(7, 8);
-        board.mark_premium_used(7, 9);
 
         // Simple rack with just 'S' - should find CATS
         let mut rack = Rack::new();
@@ -1023,9 +1217,6 @@ mod tests {
         board.place_tile(7, 7, Tile::new('C'));
         board.place_tile(7, 8, Tile::new('A'));
         board.place_tile(7, 9, Tile::new('T'));
-        board.mark_premium_used(7, 7);
-        board.mark_premium_used(7, 8);
-        board.mark_premium_used(7, 9);
 
         // Rack with letters for CATER/CATES
         let mut rack = Rack::new();
@@ -1045,6 +1236,11 @@ mod tests {
             has_cater || has_cates || has_caters,
             "Should find CATER, CATES, or CATERS"
         );
+        // Front hooks must also appear.
+        assert!(
+            moves.iter().any(|m| m.word == "SCAT"),
+            "Should find the front hook SCAT"
+        );
     }
 
     #[test]
@@ -1056,9 +1252,6 @@ mod tests {
         board.place_tile(7, 7, Tile::new('C'));
         board.place_tile(7, 8, Tile::new('A'));
         board.place_tile(7, 9, Tile::new('T'));
-        board.mark_premium_used(7, 7);
-        board.mark_premium_used(7, 8);
-        board.mark_premium_used(7, 9);
 
         // Rack with tiles that could form vertical words
         let mut rack = Rack::new();
@@ -1068,18 +1261,46 @@ mod tests {
         let solver = Solver::new(&board, &dict);
         let moves = solver.find_moves(&rack);
 
-        println!("Found {} cross-word moves:", moves.len());
-        for (i, m) in moves.iter().take(15).enumerate() {
-            println!("  {}: {} ({} pts)", i + 1, m.word, m.score);
+        // Every word formed (main and perpendicular) must be valid.
+        for m in &moves {
+            let mut board2 = board.clone();
+            for (r, c, t) in &m.tiles_used {
+                board2.place_tile(*r, *c, *t);
+            }
+            for (r, c, _) in &m.tiles_used {
+                for dir in [Direction::Horizontal, Direction::Vertical] {
+                    let (dr, dc) = dir.delta();
+                    let mut sr = *r as i32;
+                    let mut sc = *c as i32;
+                    while Board::is_valid_position(sr - dr, sc - dc)
+                        && board2
+                            .get_tile((sr - dr) as usize, (sc - dc) as usize)
+                            .is_some()
+                    {
+                        sr -= dr;
+                        sc -= dc;
+                    }
+                    let mut word = String::new();
+                    while Board::is_valid_position(sr, sc) {
+                        match board2.get_tile(sr as usize, sc as usize) {
+                            Some(t) => word.push(t.letter),
+                            None => break,
+                        }
+                        sr += dr;
+                        sc += dc;
+                    }
+                    if word.len() >= 2 {
+                        assert!(
+                            dict.is_valid(&word),
+                            "{} forms invalid word {}",
+                            m.word,
+                            word
+                        );
+                    }
+                }
+            }
         }
-
-        // All returned moves should have valid cross-words
-        // Check that AT is being found (vertical through the A of CAT)
-        let vertical_moves = moves
-            .iter()
-            .filter(|m| m.direction == Direction::Vertical)
-            .count();
-        println!("  Vertical moves: {}", vertical_moves);
+        assert!(moves.iter().any(|m| m.direction == Direction::Vertical));
     }
 
     /// Proves that rack tile order does NOT affect which plays are found.
@@ -1115,49 +1336,20 @@ mod tests {
         let moves1 = solver.find_moves(&rack_blank_first);
         let moves2 = solver.find_moves(&rack_blank_last);
 
-        // Extract unique (word, position, direction) combos
         let words1: HashSet<_> = moves1
             .iter()
-            .map(|m| (m.word.clone(), m.row, m.col, m.direction))
+            .map(|m| (m.word.clone(), m.row, m.col, m.direction, m.score))
             .collect();
         let words2: HashSet<_> = moves2
             .iter()
-            .map(|m| (m.word.clone(), m.row, m.col, m.direction))
+            .map(|m| (m.word.clone(), m.row, m.col, m.direction, m.score))
             .collect();
 
-        let only_in_1: Vec<_> = words1.difference(&words2).collect();
-        let only_in_2: Vec<_> = words2.difference(&words1).collect();
-
-        println!(
-            "Blank-first: {} plays, Blank-last: {} plays",
-            words1.len(),
-            words2.len()
-        );
-        if !only_in_1.is_empty() {
-            println!("Only in blank-first ({}):", only_in_1.len());
-            for w in only_in_1.iter().take(10) {
-                println!("  {} at ({},{}) {:?}", w.0, w.1, w.2, w.3);
-            }
-        }
-        if !only_in_2.is_empty() {
-            println!("Only in blank-last ({}):", only_in_2.len());
-            for w in only_in_2.iter().take(10) {
-                println!("  {} at ({},{}) {:?}", w.0, w.1, w.2, w.3);
-            }
-        }
-
         assert_eq!(
-            words1.len(),
-            words2.len(),
-            "Rack tile order should not affect number of plays found. \
-             Blank-first found {}, blank-last found {}",
-            words1.len(),
-            words2.len(),
+            words1, words2,
+            "Rack tile order should not affect which plays are found or their scores"
         );
-        assert!(
-            only_in_1.is_empty() && only_in_2.is_empty(),
-            "Rack tile order should not affect WHICH plays are found"
-        );
+        assert_eq!(moves1.len(), moves2.len());
     }
 
     /// Test that blank tiles enable plays with letters not in the rack.
@@ -1176,23 +1368,12 @@ mod tests {
         let solver = Solver::new(&board, &dict);
         let moves = solver.find_moves(&rack);
 
-        // Should find words that require letters NOT in {E, S, T}
-        // e.g., "BEST" (needs B from blank), "ZEST" (needs Z from blank)
-        let needs_blank = moves.iter().filter(|m| {
-            m.tiles_used.iter().any(|(_, _, t)| t.is_blank)
-        });
-        let blank_words: HashSet<_> = needs_blank.map(|m| m.word.clone()).collect();
+        let blank_words: HashSet<_> = moves
+            .iter()
+            .filter(|m| m.tiles_used.iter().any(|(_, _, t)| t.is_blank))
+            .map(|m| m.word.clone())
+            .collect();
 
-        println!(
-            "Found {} unique words using blank tile:",
-            blank_words.len()
-        );
-        for w in blank_words.iter().take(20) {
-            print!("{} ", w);
-        }
-        println!();
-
-        // Must find words using the blank for letters not in the rack
         assert!(
             blank_words.len() > 20,
             "Should find many words using blank as various letters, found {}",
@@ -1217,13 +1398,7 @@ mod tests {
         board.place_tile(7, 7, Tile::new('O'));
         board.place_tile(7, 8, Tile::new('R'));
         board.place_tile(7, 9, Tile::new('D'));
-        board.mark_premium_used(7, 6);
-        board.mark_premium_used(7, 7);
-        board.mark_premium_used(7, 8);
-        board.mark_premium_used(7, 9);
 
-        // Rack with blank + common tiles. Blank should enable plays
-        // that need uncommon letters for cross-word constraints.
         let mut rack = Rack::new();
         rack.add(Tile::blank(' '));
         rack.add(Tile::new('E'));
@@ -1234,24 +1409,10 @@ mod tests {
         let solver = Solver::new(&board, &dict);
         let moves = solver.find_moves(&rack);
 
-        // Should find plays using the blank
         let blank_plays: Vec<_> = moves
             .iter()
             .filter(|m| m.tiles_used.iter().any(|(_, _, t)| t.is_blank))
             .collect();
-
-        println!(
-            "On populated board: {} total moves, {} using blank",
-            moves.len(),
-            blank_plays.len()
-        );
-        for m in blank_plays.iter().take(10) {
-            println!(
-                "  {} at ({},{}) {:?} score={}",
-                m.word, m.row, m.col, m.direction, m.score
-            );
-        }
-
         assert!(
             !blank_plays.is_empty(),
             "Should find plays using blank on populated board"
@@ -1268,16 +1429,237 @@ mod tests {
         let moves_reversed = solver.find_moves(&rack_reversed);
         let words1: HashSet<_> = moves
             .iter()
-            .map(|m| (m.word.clone(), m.row, m.col, m.direction))
+            .map(|m| (m.word.clone(), m.row, m.col, m.direction, m.score))
             .collect();
         let words2: HashSet<_> = moves_reversed
             .iter()
-            .map(|m| (m.word.clone(), m.row, m.col, m.direction))
+            .map(|m| (m.word.clone(), m.row, m.col, m.direction, m.score))
             .collect();
 
         assert_eq!(
             words1, words2,
             "Rack order should not affect plays on populated board"
         );
+    }
+
+    /// When a word needs the same letter twice and the rack has one real
+    /// copy plus a blank, the real tile must land on the square where it
+    /// scores most (the blank is worth 0 regardless of premium).
+    #[test]
+    fn test_blank_goes_on_cheaper_square() {
+        let dict = load_default_dictionary().unwrap();
+        let board = Board::new();
+
+        // Property check: for every move, swapping the blank flag between two
+        // placed squares holding the same letter must not increase the score.
+        let mut rack = Rack::new();
+        for ch in ['E', 'E', 'T', 'S', 'A'] {
+            rack.add(Tile::new(ch));
+        }
+        rack.add(Tile::blank(' '));
+
+        let solver = Solver::new(&board, &dict);
+        let moves = solver.find_moves(&rack);
+        for m in &moves {
+            let n = m.tiles_used.len();
+            for i in 0..n {
+                for j in 0..n {
+                    let (_, _, ti) = m.tiles_used[i];
+                    let (_, _, tj) = m.tiles_used[j];
+                    if i == j || ti.letter != tj.letter || ti.is_blank == tj.is_blank {
+                        continue;
+                    }
+                    let mut swapped = m.tiles_used.clone();
+                    swapped[i].2.is_blank = tj.is_blank;
+                    swapped[j].2.is_blank = ti.is_blank;
+                    let alt = solver.score_placed_tiles(&swapped, m.direction);
+                    assert!(
+                        alt <= m.score,
+                        "{} at {}: blank placement scores {} but swapping gives {}",
+                        m.word,
+                        m.coords(),
+                        m.score,
+                        alt
+                    );
+                }
+            }
+        }
+
+        // Concrete case: rack has one A and a blank; "ALA" style words put
+        // the two A's on different premiums. Check a known word explicitly.
+        let mut rack = Rack::new();
+        rack.add(Tile::new('A'));
+        rack.add(Tile::blank(' '));
+        rack.add(Tile::new('L'));
+        let moves = solver.find_moves(&rack);
+        let ala: Vec<_> = moves.iter().filter(|m| m.word == "ALA").collect();
+        assert!(!ala.is_empty(), "ALA should be generated");
+        for m in ala {
+            let real_a = m
+                .tiles_used
+                .iter()
+                .find(|(_, _, t)| t.letter == 'A' && !t.is_blank)
+                .expect("one real A");
+            let blank_a = m
+                .tiles_used
+                .iter()
+                .find(|(_, _, t)| t.letter == 'A' && t.is_blank)
+                .expect("one blank A");
+            let prem = |rc: (usize, usize)| board.get(rc.0, rc.1).unwrap().premium;
+            let real_lm = prem((real_a.0, real_a.1)).letter_multiplier();
+            let blank_lm = prem((blank_a.0, blank_a.1)).letter_multiplier();
+            assert!(
+                real_lm >= blank_lm,
+                "ALA at {}: real A on x{} square, blank on x{}",
+                m.coords(),
+                real_lm,
+                blank_lm
+            );
+        }
+    }
+
+    /// Incremental scoring during search must agree with the standalone
+    /// scorer used for opponent moves.
+    #[test]
+    fn test_incremental_score_matches_standalone() {
+        let dict = load_default_dictionary().unwrap();
+        let mut board = Board::new();
+        board.place_tile(7, 3, Tile::new('B'));
+        board.place_tile(7, 4, Tile::new('E'));
+        board.place_tile(7, 5, Tile::new('E'));
+        board.place_tile(7, 6, Tile::new('C'));
+        board.place_tile(7, 7, Tile::new('H'));
+        board.place_tile(8, 7, Tile::new('I'));
+        board.place_tile(9, 7, Tile::new('K'));
+        board.place_tile(10, 7, Tile::new('E'));
+        board.place_tile(11, 7, Tile::blank('R'));
+
+        let mut rack = Rack::new();
+        for ch in ['A', 'E', 'I', 'S', 'T', 'R'] {
+            rack.add(Tile::new(ch));
+        }
+        rack.add(Tile::blank(' '));
+
+        let solver = Solver::new(&board, &dict);
+        let moves = solver.find_moves(&rack);
+        assert!(moves.len() > 100);
+        for m in &moves {
+            let standalone = solver.score_placed_tiles(&m.tiles_used, m.direction);
+            assert_eq!(
+                m.score,
+                standalone,
+                "{} at {}: incremental {} vs standalone {}",
+                m.word,
+                m.coords(),
+                m.score,
+                standalone
+            );
+        }
+    }
+
+    /// Each distinct tile placement must appear exactly once.
+    #[test]
+    fn test_no_duplicate_placements() {
+        let dict = load_default_dictionary().unwrap();
+        let mut board = Board::new();
+        board.place_tile(7, 6, Tile::new('C'));
+        board.place_tile(7, 7, Tile::new('A'));
+        board.place_tile(7, 8, Tile::new('T'));
+        board.place_tile(6, 8, Tile::new('O'));
+
+        let mut rack = Rack::new();
+        for ch in ['S', 'E', 'R', 'A', 'T'] {
+            rack.add(Tile::new(ch));
+        }
+
+        let solver = Solver::new(&board, &dict);
+        let moves = solver.find_moves(&rack);
+        let mut seen = HashSet::new();
+        for m in &moves {
+            let mut key: Vec<(usize, usize, char, bool)> = m
+                .tiles_used
+                .iter()
+                .map(|(r, c, t)| (*r, *c, t.letter, t.is_blank))
+                .collect();
+            key.sort();
+            assert!(
+                seen.insert(key.clone()),
+                "duplicate placement for {} at {}",
+                m.word,
+                m.coords()
+            );
+        }
+        // The single S hooked after CAT is a one-tile play and must be listed
+        // exactly once even though it is reachable from both directions.
+        assert_eq!(
+            moves
+                .iter()
+                .filter(|m| {
+                    m.tiles_used.len() == 1
+                        && m.tiles_used[0].0 == 7
+                        && m.tiles_used[0].1 == 9
+                        && m.tiles_used[0].2.letter == 'S'
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_bingo_bonus_and_leave() {
+        let dict = load_default_dictionary().unwrap();
+        let board = Board::new();
+        let mut rack = Rack::new();
+        for ch in ['R', 'E', 'T', 'A', 'I', 'N', 'S'] {
+            rack.add(Tile::new(ch));
+        }
+        let solver = Solver::new(&board, &dict);
+        let moves = solver.find_moves(&rack);
+        let retains = moves
+            .iter()
+            .find(|m| m.word == "RETAINS" && m.direction == Direction::Horizontal && m.col == 3)
+            .expect("RETAINS at 8D");
+        assert!(retains.is_bingo);
+        assert!(retains.leave.is_empty());
+        // 7 one-point tiles on row 7 starting at col 3 (DW) with DL at 5 and 9:
+        // (1+1+2+1+1+1+2) * 2 = 18, plus 40 bingo.
+        assert_eq!(retains.score, 18 + BINGO_BONUS);
+        assert_eq!(retains.coords(), "8D");
+    }
+
+    /// Timing harness for move generation. Run with
+    /// `cargo test --release bench_movegen -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_movegen() {
+        use crate::game::SolverState;
+        use std::time::Instant;
+
+        let dict = load_default_dictionary().unwrap();
+        const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
+        const BEECH: &str = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15";
+        const END: &str = "3N3Q3M3/3OP2UNTEACH1/3BE2O3N3/3LA2T2MYOPE/2FeR2H1LO4/2O6AB4/2R1F4U3De/2TRIVET1D3AY/4LA1A1IODIZE/4KI1JINX2ES/5R1E1G4O/OUTIES1S3G2R/11L2E/8WAHINES/2EGAlITE2A3";
+        let positions = [
+            (
+                "empty AEINRST",
+                "15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 AEINRST".to_string(),
+            ),
+            ("midgame JSIRATU", format!("{} JSIRATU", MID)),
+            ("endgame RCVSDW", format!("{} RCVSDW", END)),
+            ("beech AEIO?ST", format!("{} AEIO?ST", BEECH)),
+            ("beech ??EINRS", format!("{} ??EINRS", BEECH)),
+        ];
+        for (name, cgp) in &positions {
+            let state = SolverState::from_cgp(cgp).unwrap();
+            let solver = Solver::new(&state.board, &dict);
+            let _ = solver.find_moves(&state.rack);
+            let iters = 20;
+            let t = Instant::now();
+            let mut n = 0;
+            for _ in 0..iters {
+                n = solver.find_moves(&state.rack).len();
+            }
+            println!("{:18} {:6} moves  {:?}/call", name, n, t.elapsed() / iters);
+        }
     }
 }

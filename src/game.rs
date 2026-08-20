@@ -85,7 +85,6 @@ impl SolverState {
         };
 
         self.board.place_tile(row, col, tile);
-        self.board.mark_premium_used(row, col);
     }
 
     /// Remove a tile from the board
@@ -197,7 +196,6 @@ impl SolverState {
     pub fn apply_move(&mut self, mv: &Move) {
         for (row, col, tile) in &mv.tiles_used {
             self.board.place_tile(*row, *col, *tile);
-            self.board.mark_premium_used(*row, *col);
 
             // Clear the matching tile from the rack (leaves slot empty)
             // For blanks, we match by is_blank (the letter is what it became)
@@ -213,6 +211,59 @@ impl SolverState {
                 self.rack.clear_slot(idx);
             }
         }
+    }
+
+    /// Build a state from the board and rack sections of a CGP string
+    /// (`<board> <rack>[/<opp_rack>] ...`). Rows are separated by `/`, digits
+    /// are runs of empty squares, uppercase letters are tiles and lowercase
+    /// letters are blanks designated as that letter. Only the board and our
+    /// rack are read; anything after them is ignored.
+    pub fn from_cgp(cgp: &str) -> Result<Self, String> {
+        let mut sections = cgp.split_whitespace();
+        let board_str = sections.next().ok_or("empty CGP")?;
+        let rack_str = sections.next().unwrap_or("");
+
+        let mut state = SolverState::new();
+        let rows: Vec<&str> = board_str.split('/').collect();
+        if rows.len() != BOARD_SIZE {
+            return Err(format!("expected {} rows, got {}", BOARD_SIZE, rows.len()));
+        }
+        for (row, row_str) in rows.iter().enumerate() {
+            let mut col = 0;
+            let mut run = 0;
+            for ch in row_str.chars() {
+                if let Some(d) = ch.to_digit(10) {
+                    run = run * 10 + d as usize;
+                    continue;
+                }
+                col += run;
+                run = 0;
+                if !ch.is_ascii_alphabetic() {
+                    return Err(format!("bad board character {:?} in row {}", ch, row + 1));
+                }
+                if col >= BOARD_SIZE {
+                    return Err(format!("row {} is too long", row + 1));
+                }
+                state.place_tile(row, col, ch.to_ascii_uppercase(), ch.is_ascii_lowercase());
+                col += 1;
+            }
+            col += run;
+            if col != BOARD_SIZE {
+                return Err(format!(
+                    "row {} has {} squares, expected {}",
+                    row + 1,
+                    col,
+                    BOARD_SIZE
+                ));
+            }
+        }
+
+        for ch in rack_str.split('/').next().unwrap_or("").chars() {
+            if !state.add_to_rack(ch) {
+                return Err(format!("bad or excess rack tile {:?}", ch));
+            }
+        }
+        Ok(state)
     }
 
     /// Reset everything
@@ -405,6 +456,25 @@ mod tests {
         assert_eq!(state.get_tile(7, 8).unwrap().letter, 'A');
         assert_eq!(state.get_tile(7, 9).unwrap().letter, 'T');
         assert!(state.rack.is_empty());
+    }
+
+    #[test]
+    fn test_from_cgp_round_trip() {
+        let cgp = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15 AEI?/ 0/0 0";
+        let state = SolverState::from_cgp(cgp).expect("valid CGP");
+        assert_eq!(state.get_tile(7, 3).unwrap().letter, 'B');
+        assert_eq!(state.get_tile(7, 7).unwrap().letter, 'H');
+        let r = state.get_tile(11, 7).unwrap();
+        assert!(r.is_blank && r.letter == 'R');
+        assert_eq!(state.rack.len(), 4);
+        assert!(state.rack.tiles()[3].is_blank);
+        assert_eq!(state.unseen_tile_count(), 100 - 9 - 4);
+
+        assert!(SolverState::from_cgp("15/15 A").is_err());
+        assert!(SolverState::from_cgp("16/15/15/15/15/15/15/15/15/15/15/15/15/15/15 A").is_err());
+        assert!(
+            SolverState::from_cgp("15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 ABCDEFGH").is_err()
+        );
     }
 
     #[test]
