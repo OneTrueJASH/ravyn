@@ -62,13 +62,15 @@ pub struct Move {
 }
 
 impl Move {
-    /// A pass: nothing placed, nothing exchanged, whole rack kept.
+    /// A pass: nothing placed, nothing exchanged, whole rack kept. Like an
+    /// exchange it sits off the board (`row`/`col` = `BOARD_SIZE`) so it
+    /// never shares a (word, square) key with a real play.
     pub fn pass(rack: &[Tile]) -> Self {
         Move {
             kind: MoveKind::Pass,
             word: PASS_WORD.to_string(),
-            row: 0,
-            col: 0,
+            row: BOARD_SIZE,
+            col: BOARD_SIZE,
             direction: Direction::Horizontal,
             score: 0,
             tiles_used: Vec::new(),
@@ -100,8 +102,8 @@ impl Move {
         Move {
             kind: MoveKind::Exchange(exchanged),
             word,
-            row: 0,
-            col: 0,
+            row: BOARD_SIZE,
+            col: BOARD_SIZE,
             direction: Direction::Horizontal,
             score: 0,
             tiles_used: Vec::new(),
