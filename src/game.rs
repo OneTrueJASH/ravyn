@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::board::{Board, BOARD_SIZE};
 use crate::dictionary::Dictionary;
-use crate::solver::{Move, Solver};
+use crate::solver::{Move, Solver, EXCHANGE_MIN_BAG};
 use crate::tile::{Rack, Tile, RACK_SIZE};
 
 /// Total number of tiles in a standard Crossplay game.
@@ -55,6 +55,56 @@ fn standard_distribution() -> HashMap<char, u32> {
         "Tile distribution must sum to TOTAL_TILES"
     );
     dist
+}
+
+/// Every tile in a fresh bag, in distribution order.
+#[cfg_attr(not(test), allow(dead_code))] // self-play studies and library consumers
+pub fn full_tile_set() -> Vec<Tile> {
+    let mut dist: Vec<(char, u32)> = standard_distribution().into_iter().collect();
+    dist.sort();
+    let mut tiles = Vec::with_capacity(TOTAL_TILES);
+    for (letter, count) in dist {
+        for _ in 0..count {
+            tiles.push(if letter == '?' {
+                Tile::blank(' ')
+            } else {
+                Tile::new(letter)
+            });
+        }
+    }
+    tiles
+}
+
+/// Every distinct exchange from `rack` (one per multiset of exchanged
+/// tiles), valued by the phase-scaled leave value of the tiles kept. The
+/// caller checks that the bag permits exchanging.
+pub fn exchange_moves(rack: &[Tile], dictionary: &Dictionary, unseen: Option<usize>) -> Vec<Move> {
+    let n = rack.len();
+    let mut seen: std::collections::HashSet<Vec<(bool, char)>> = std::collections::HashSet::new();
+    let mut moves = Vec::new();
+    for mask in 1u32..(1u32 << n) {
+        let exchanged: Vec<Tile> = (0..n)
+            .filter(|i| mask & (1 << i) != 0)
+            .map(|i| rack[i])
+            .collect();
+        let mut key: Vec<(bool, char)> = exchanged.iter().map(|t| (t.is_blank, t.letter)).collect();
+        key.sort_unstable();
+        if !seen.insert(key) {
+            continue;
+        }
+        let mut kept = rack.to_vec();
+        for t in &exchanged {
+            if let Some(i) = kept
+                .iter()
+                .position(|k| k.is_blank == t.is_blank && (k.is_blank || k.letter == t.letter))
+            {
+                kept.swap_remove(i);
+            }
+        }
+        let equity = dictionary.leave_value(&kept, unseen);
+        moves.push(Move::exchange(rack, exchanged, equity));
+    }
+    moves
 }
 
 /// The solver state - tracks board and rack for finding optimal plays
@@ -186,28 +236,47 @@ impl SolverState {
         self.unseen_tile_count() <= RACK_SIZE
     }
 
-    /// Get suggested moves using the solver
-    pub fn get_suggestions(&self, dictionary: &Dictionary) -> Vec<Move> {
-        let solver = Solver::new(&self.board, dictionary);
-        solver.find_moves(&self.rack)
+    /// Tiles in the bag: the unseen tiles minus the opponent's full rack.
+    /// (While the bag has tiles the opponent always holds seven.)
+    pub fn bag_size(&self) -> usize {
+        self.unseen_tile_count().saturating_sub(RACK_SIZE)
     }
 
-    /// Apply a move to the board (clear used tiles from rack, keeping positions)
+    /// All candidate moves for our rack, best static equity first: every
+    /// legal play, plus every distinct exchange when the bag allows one.
+    pub fn get_suggestions(&self, dictionary: &Dictionary) -> Vec<Move> {
+        let solver = Solver::new(&self.board, dictionary);
+        let mut moves = solver.find_moves(&self.rack);
+        let unseen = self.unseen_tile_count();
+        if unseen.saturating_sub(RACK_SIZE) >= EXCHANGE_MIN_BAG {
+            moves.extend(exchange_moves(&self.rack.tiles(), dictionary, Some(unseen)));
+            moves.sort_by(|a, b| {
+                b.equity
+                    .partial_cmp(&a.equity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(b.score.cmp(&a.score))
+            });
+        }
+        moves
+    }
+
+    /// Apply a move: place its tiles on the board (for a play) and clear the
+    /// tiles it consumes from the rack, keeping slot positions. Exchanged
+    /// tiles leave the rack too; the replacements are typed in afterwards.
     pub fn apply_move(&mut self, mv: &Move) {
         for (row, col, tile) in &mv.tiles_used {
             self.board.place_tile(*row, *col, *tile);
-
-            // Clear the matching tile from the rack (leaves slot empty)
-            // For blanks, we match by is_blank (the letter is what it became)
-            // For regular tiles, we match by letter
-            if tile.is_blank {
-                if let Some(idx) = self.rack.find_index(|t| t.is_blank) {
-                    self.rack.clear_slot(idx);
-                }
-            } else if let Some(idx) = self
-                .rack
-                .find_index(|t| !t.is_blank && t.letter == tile.letter)
-            {
+        }
+        for tile in mv.tiles_from_rack() {
+            // For blanks, match by is_blank (the letter is what it became);
+            // for regular tiles, match by letter.
+            let idx = if tile.is_blank {
+                self.rack.find_index(|t| t.is_blank)
+            } else {
+                self.rack
+                    .find_index(|t| !t.is_blank && t.letter == tile.letter)
+            };
+            if let Some(idx) = idx {
                 self.rack.clear_slot(idx);
             }
         }
@@ -285,7 +354,7 @@ mod tests {
     use super::*;
     use crate::board::Direction;
     use crate::dictionary::load_default_dictionary;
-    use crate::solver::Move;
+    use crate::solver::{Move, MoveKind};
     use crate::tile::Tile;
 
     #[test]
@@ -436,6 +505,7 @@ mod tests {
         state.add_to_rack('T');
 
         let mv = Move {
+            kind: MoveKind::Play,
             word: "CAT".to_string(),
             row: 7,
             col: 7,

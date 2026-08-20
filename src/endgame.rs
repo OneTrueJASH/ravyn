@@ -27,14 +27,11 @@
 
 use rayon::prelude::*;
 
-use crate::board::{Board, Direction};
+use crate::board::Board;
 use crate::dictionary::Dictionary;
 use crate::logging::log;
 use crate::solver::{Move, Solver};
 use crate::tile::{Rack, Tile};
-
-/// Word used for the pass candidate in endgame results.
-pub const PASS_WORD: &str = "PASS";
 
 /// A move in the principal variation (the optimal 2-move sequence)
 #[derive(Debug, Clone)]
@@ -118,7 +115,7 @@ impl<'a> EndgameSolver<'a> {
                 })
                 .collect()
         } else {
-            our_moves.push(Self::pass_move(our_rack));
+            our_moves.push(Move::pass(our_rack));
             let mut opp_rack = Rack::new();
             for t in opponent_rack {
                 opp_rack.add(*t);
@@ -194,27 +191,13 @@ impl<'a> EndgameSolver<'a> {
 
         results
     }
-
-    /// The pass candidate: no tiles placed, zero score, whole rack kept.
-    fn pass_move(our_rack: &[Tile]) -> Move {
-        Move {
-            word: PASS_WORD.to_string(),
-            row: 0,
-            col: 0,
-            direction: Direction::Horizontal,
-            score: 0,
-            tiles_used: Vec::new(),
-            is_bingo: false,
-            leave: our_rack.to_vec(),
-            equity: 0.0,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dictionary::load_default_dictionary;
+    use crate::solver::PASS_WORD;
 
     fn make_board_with_cat() -> Board {
         let mut board = Board::new();

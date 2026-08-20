@@ -8,6 +8,7 @@ use cpsolver2::board::Board;
 use cpsolver2::dictionary::{load_default_dictionary, Dictionary};
 use cpsolver2::endgame::EndgameSolver;
 use cpsolver2::game::SolverState;
+use cpsolver2::solver::MoveKind;
 use cpsolver2::tile::Tile;
 
 /// Load the dictionary once for tests that need it.
@@ -42,19 +43,37 @@ fn test_full_solve_flow() {
         "Solver should return at least one valid move"
     );
 
-    // Every returned move should have a positive score and non-empty tiles_used.
+    // Every play should have a positive score and non-empty tiles_used;
+    // exchanges (the bag is full here, so they are offered) score 0.
+    let mut plays = 0;
+    let mut exchanges = 0;
     for mv in &suggestions {
-        assert!(
-            mv.score > 0,
-            "Move '{}' should have a positive score",
-            mv.word
-        );
-        assert!(
-            !mv.tiles_used.is_empty(),
-            "Move '{}' should place at least one tile",
-            mv.word
-        );
+        match &mv.kind {
+            MoveKind::Play => {
+                plays += 1;
+                assert!(
+                    mv.score > 0,
+                    "Move '{}' should have a positive score",
+                    mv.word
+                );
+                assert!(
+                    !mv.tiles_used.is_empty(),
+                    "Move '{}' should place at least one tile",
+                    mv.word
+                );
+            }
+            MoveKind::Exchange(tiles) => {
+                exchanges += 1;
+                assert_eq!(mv.score, 0);
+                assert!(mv.tiles_used.is_empty());
+                assert_eq!(tiles.len() + mv.leave.len(), 7);
+            }
+            MoveKind::Pass => panic!("passes are not suggested"),
+        }
     }
+    assert!(plays > 0);
+    // 7 distinct tiles: every non-empty subset is a distinct exchange.
+    assert_eq!(exchanges, 127);
 
     // Moves should be sorted by equity (descending).
     for pair in suggestions.windows(2) {

@@ -87,6 +87,7 @@ impl Rack {
     }
 
     /// Count of actual tiles (not empty slots)
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub fn len(&self) -> usize {
         self.slots.iter().filter(|s| s.is_some()).count()
     }

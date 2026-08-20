@@ -27,9 +27,29 @@ const ALL_LETTERS: u32 = (1 << 26) - 1;
 /// Index of the blank in the rack count array.
 const BLANK_IDX: usize = 26;
 
+/// What a move does on the board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveKind {
+    /// Tiles placed on the board (`tiles_used`).
+    Play,
+    /// These rack tiles go back in the bag and as many are drawn; no score.
+    /// Only legal while the bag holds at least [`EXCHANGE_MIN_BAG`] tiles.
+    Exchange(Vec<Tile>),
+    /// Turn forfeited, rack unchanged.
+    Pass,
+}
+
+/// Smallest bag that still permits an exchange (the universal word-game
+/// convention and RefEngine's default; see PRIMER.md).
+pub const EXCHANGE_MIN_BAG: usize = 7;
+
+/// Word shown for a pass.
+pub const PASS_WORD: &str = "PASS";
+
 /// A potential move that can be played
 #[derive(Debug, Clone)]
 pub struct Move {
+    pub kind: MoveKind,
     pub word: String,
     pub row: usize,
     pub col: usize,
@@ -41,102 +61,71 @@ pub struct Move {
     pub equity: f32,                           // Strategic value (score + leave value)
 }
 
-/// Parameters for constructing a Move from external data (e.g., RefEngine results)
-pub struct ExternalMoveData<'a> {
-    pub word: &'a str,
-    pub row: usize,
-    pub col: usize,
-    pub direction: Direction,
-    pub score: u32,
-    pub equity: f32,
-}
-
 impl Move {
-    /// Construct a Move from external data (e.g., RefEngine results)
-    ///
-    /// The word uses lowercase letters to indicate blanks (e.g., "SNiPER" = blank as I)
-    /// Returns None if the move can't be reconstructed with the given rack
-    pub fn from_external(data: &ExternalMoveData, board: &Board, rack: &Rack) -> Option<Self> {
-        let word = data.word;
-        let row = data.row;
-        let col = data.col;
-        let direction = data.direction;
-        let score = data.score;
-        let equity = data.equity;
-        let (dr, dc) = direction.delta();
-        let mut tiles_used = Vec::new();
-        let mut rack_remaining: Vec<Tile> = rack.tiles().to_vec();
+    /// A pass: nothing placed, nothing exchanged, whole rack kept.
+    pub fn pass(rack: &[Tile]) -> Self {
+        Move {
+            kind: MoveKind::Pass,
+            word: PASS_WORD.to_string(),
+            row: 0,
+            col: 0,
+            direction: Direction::Horizontal,
+            score: 0,
+            tiles_used: Vec::new(),
+            is_bingo: false,
+            leave: rack.to_vec(),
+            equity: 0.0,
+        }
+    }
 
-        for (i, ch) in word.chars().enumerate() {
-            let r = row as i32 + dr * i as i32;
-            let c = col as i32 + dc * i as i32;
-
-            if !(0..BOARD_SIZE as i32).contains(&r) || !(0..BOARD_SIZE as i32).contains(&c) {
-                return None; // Out of bounds
-            }
-
-            let r = r as usize;
-            let c = c as usize;
-
-            // Check if there's already a tile on the board at this position
-            if board.get_tile(r, c).is_some() {
-                // Tile already on board, not placed from rack
-                continue;
-            }
-
-            // Need to place a tile from rack
-            let is_blank = ch.is_ascii_lowercase();
-            let letter = ch.to_ascii_uppercase();
-
-            // Find matching tile in remaining rack
-            let tile_idx = if is_blank {
-                // Need a blank tile
-                rack_remaining.iter().position(|t| t.is_blank)
-            } else {
-                // Need the specific letter
-                rack_remaining
-                    .iter()
-                    .position(|t| !t.is_blank && t.letter == letter)
-            };
-
-            match tile_idx {
-                Some(idx) => {
-                    let mut tile = rack_remaining.remove(idx);
-                    if is_blank {
-                        // Set the letter the blank represents
-                        tile.letter = letter;
-                    }
-                    tiles_used.push((r, c, tile));
-                }
-                None => {
-                    // Can't find required tile - try using a blank as fallback
-                    let idx = rack_remaining.iter().position(|t| t.is_blank)?;
-                    let mut tile = rack_remaining.remove(idx);
-                    tile.letter = letter;
-                    tiles_used.push((r, c, tile));
-                }
+    /// An exchange of `exchanged` (drawn from `rack`), keeping the rest.
+    /// `equity` is the caller's valuation of the kept tiles.
+    pub fn exchange(rack: &[Tile], exchanged: Vec<Tile>, equity: f32) -> Self {
+        let mut leave = rack.to_vec();
+        for t in &exchanged {
+            if let Some(i) = leave
+                .iter()
+                .position(|k| k.is_blank == t.is_blank && (k.is_blank || k.letter == t.letter))
+            {
+                leave.swap_remove(i);
             }
         }
-
-        let is_bingo = tiles_used.len() == RACK_SIZE;
-
-        Some(Move {
-            word: word.to_uppercase(), // Normalize to uppercase for display
-            row,
-            col,
-            direction,
-            score,
-            tiles_used,
-            is_bingo,
-            leave: rack_remaining,
+        let word = format!(
+            "EXCH {}",
+            exchanged
+                .iter()
+                .map(|t| if t.is_blank { '?' } else { t.letter })
+                .collect::<String>()
+        );
+        Move {
+            kind: MoveKind::Exchange(exchanged),
+            word,
+            row: 0,
+            col: 0,
+            direction: Direction::Horizontal,
+            score: 0,
+            tiles_used: Vec::new(),
+            is_bingo: false,
+            leave,
             equity,
-        })
+        }
+    }
+
+    /// Tiles that leave the rack when this move is made: placed tiles for a
+    /// play, the exchanged tiles for an exchange, nothing for a pass.
+    pub fn tiles_from_rack(&self) -> Vec<Tile> {
+        match &self.kind {
+            MoveKind::Play => self.tiles_used.iter().map(|(_, _, t)| *t).collect(),
+            MoveKind::Exchange(tiles) => tiles.clone(),
+            MoveKind::Pass => Vec::new(),
+        }
     }
 
     /// Board coordinates in the conventional notation: row number first for
     /// horizontal plays (`8D`), column letter first for vertical plays (`D8`).
+    /// Exchanges and passes have no position and show `-`.
     pub fn coords(&self) -> String {
-        if self.tiles_used.is_empty() {
+        if self.kind != MoveKind::Play {
             return "-".to_string();
         }
         let col_letter = (b'A' + self.col as u8) as char;
@@ -1060,6 +1049,7 @@ impl<'s, 'a> Gen<'s, 'a> {
         let (row, col) = self.rc(self.word_start);
 
         self.moves.push(Move {
+            kind: MoveKind::Play,
             word,
             row,
             col,

@@ -17,15 +17,65 @@
 //! order, which we compute from per-node subtree word counts.
 //!
 //! The values were fitted for standard English Scrabble (2 blanks, 4 S's,
-//! 50-point bingos). Crossplay has 3 blanks, 5 S's and 40-point bingos, so
-//! blank- and bingo-heavy leaves are worth somewhat less than the table
-//! says; the table is still far better calibrated than per-letter guesses.
+//! 50-point bingos). Crossplay has 3 blanks, 5 S's and 40-point bingos. The
+//! bonus difference is corrected for here ([`bingo_bonus_correction`]): a
+//! leave that makes a bingo more likely is worth 10 points less per unit of
+//! probability than the table says. The remaining differences (tile counts,
+//! board) are second order; the table is still far better calibrated than
+//! per-letter guesses.
 
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
 use crate::tile::Tile;
+
+/// Scrabble's bingo bonus, the one the leave table was fitted under.
+const TABLE_BINGO_BONUS: f32 = 50.0;
+
+/// Logistic model of the probability that a rack keeping a given leave
+/// finds a bingo on its next turn, in Crossplay self-play positions:
+/// `p = sigmoid(bias + sum(weight[letter] * count))`, blank at index 26.
+///
+/// Fitted 2026-08-20 by `cargo test --release study_bingo_probability --
+/// --ignored --nocapture` in `mcts.rs`: 24,549 sampled leaves (0-6 tiles)
+/// from 400 self-play games, log-loss 0.425 against 0.485 for a constant
+/// 18.9%. Single-tile probabilities: blank 0.587, S 0.273, R 0.226,
+/// E 0.207, Q 0.014, J 0.025. The fit is linear in counts, so multi-tile
+/// synergy beyond additive log-odds is not captured.
+const BINGO_MODEL_BIAS: f32 = -1.481;
+const BINGO_MODEL_WEIGHTS: [f32; 27] = [
+    0.008, -0.473, -0.020, -0.077, 0.140, -0.859, -0.377, -0.391, 0.008, -2.168, -1.034, 0.092,
+    -0.124, 0.142, -0.171, -0.351, -2.770, 0.248, 0.501, 0.207, -0.182, -0.848, -1.052, -1.767,
+    -1.018, -1.423, 1.831,
+];
+
+/// Probability of a bingo next turn for a rack keeping `leave` (see
+/// [`BINGO_MODEL_WEIGHTS`]).
+pub fn bingo_probability(leave: &[Tile]) -> f32 {
+    let mut z = BINGO_MODEL_BIAS;
+    for t in leave {
+        let idx = if t.is_blank {
+            26
+        } else {
+            (t.letter as u8).wrapping_sub(b'A') as usize
+        };
+        if let Some(w) = BINGO_MODEL_WEIGHTS.get(idx) {
+            z += w;
+        }
+    }
+    1.0 / (1.0 + (-z).exp())
+}
+
+/// Adjustment that converts a table value fitted under a 50-point bingo
+/// bonus to Crossplay's 40: minus 10 points per unit of extra next-turn
+/// bingo probability relative to drawing seven fresh tiles. First order
+/// only (the following turn's bingo chances are not adjusted).
+pub fn bingo_bonus_correction(leave: &[Tile], bingo_bonus: u32) -> f32 {
+    let p = bingo_probability(leave);
+    let p0 = bingo_probability(&[]);
+    (bingo_bonus as f32 - TABLE_BINGO_BONUS) * (p - p0)
+}
 
 const ARC_MASK: u32 = 0x3F_FFFF;
 const IS_END: u32 = 1 << 22;
@@ -283,6 +333,24 @@ mod tests {
         assert!(lv
             .value(&"AEINRST".chars().map(Tile::new).collect::<Vec<_>>())
             .is_none());
+    }
+
+    #[test]
+    fn bingo_correction_direction_and_size() {
+        let blank = [Tile::blank(' ')];
+        let q = [Tile::new('Q')];
+        let p0 = bingo_probability(&[]);
+        assert!((p0 - 0.185).abs() < 0.01, "{p0}");
+        assert!(bingo_probability(&blank) > 0.5);
+        assert!(bingo_probability(&q) < 0.03);
+        // Blank: roughly -4 points; Q: roughly +1.7; empty leave: exactly 0.
+        let c_blank = bingo_bonus_correction(&blank, 40);
+        let c_q = bingo_bonus_correction(&q, 40);
+        assert!((-4.5..-3.5).contains(&c_blank), "{c_blank}");
+        assert!((1.4..2.0).contains(&c_q), "{c_q}");
+        assert_eq!(bingo_bonus_correction(&[], 40), 0.0);
+        // Under Scrabble's own bonus there is nothing to correct.
+        assert_eq!(bingo_bonus_correction(&blank, 50), 0.0);
     }
 
     #[test]
