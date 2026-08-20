@@ -357,6 +357,26 @@ mod tests {
     use crate::solver::{Move, MoveKind};
     use crate::tile::Tile;
 
+    fn t(s: &str) -> Vec<Tile> {
+        s.chars()
+            .map(|c| {
+                if c == '?' {
+                    Tile::blank(' ')
+                } else {
+                    Tile::new(c)
+                }
+            })
+            .collect()
+    }
+    fn key(v: &[Tile]) -> Vec<(bool, char)> {
+        let mut k: Vec<(bool, char)> = v
+            .iter()
+            .map(|x| (x.is_blank, if x.is_blank { '?' } else { x.letter }))
+            .collect();
+        k.sort();
+        k
+    }
+
     #[test]
     fn test_new_state_is_empty() {
         let state = SolverState::new();
@@ -568,5 +588,87 @@ mod tests {
             !suggestions.is_empty(),
             "should find at least one valid move"
         );
+    }
+
+    #[test]
+    fn exchange_moves_complete_and_distinct() {
+        let dict = load_default_dictionary().unwrap();
+        let rack = t("AABC??D");
+        let moves = exchange_moves(&rack, &dict, Some(80));
+        // distinct multisets: A:0-2 (3) * B (2) * C (2) * ?:0-2 (3) * D (2) - 1 = 71
+        assert_eq!(moves.len(), 71);
+        let mut seen = std::collections::HashSet::new();
+        for m in &moves {
+            let MoveKind::Exchange(ex) = &m.kind else {
+                panic!()
+            };
+            assert!(seen.insert(key(ex)));
+            // leave + exchanged == rack as multisets
+            let mut all = m.leave.clone();
+            all.extend(ex.iter().copied());
+            assert_eq!(key(&all), key(&rack));
+            assert_eq!(m.coords(), "-");
+            assert_eq!(m.score, 0);
+            assert!(m.tiles_used.is_empty());
+            assert_eq!(m.tiles_from_rack().len(), ex.len());
+        }
+    }
+
+    #[test]
+    fn get_suggestions_exchanges_only_with_bag_of_seven() {
+        let dict = load_default_dictionary().unwrap();
+        // MID board: 87 tiles; rack AEST -> unseen 9 -> bag 2: no exchanges.
+        const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
+        let s = SolverState::from_cgp(&format!("{} AEST", MID)).unwrap();
+        assert_eq!(s.bag_size(), 2);
+        assert!(s
+            .get_suggestions(&dict)
+            .iter()
+            .all(|m| m.kind == MoveKind::Play));
+        // BEECH board: bag 77: exchanges present, sorted by equity with plays.
+        let s =
+            SolverState::from_cgp("15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15 QVWXZ?A")
+                .unwrap();
+        let sugg = s.get_suggestions(&dict);
+        let n_ex = sugg
+            .iter()
+            .filter(|m| matches!(m.kind, MoveKind::Exchange(_)))
+            .count();
+        assert!(n_ex > 0);
+        for w in sugg.windows(2) {
+            assert!(w[0].equity >= w[1].equity - 1e-4);
+        }
+        // With a rack this bad, some exchange should beat the median play.
+        let best_ex = sugg
+            .iter()
+            .position(|m| matches!(m.kind, MoveKind::Exchange(_)))
+            .unwrap();
+        assert!(
+            best_ex < sugg.len() / 2,
+            "best exchange at rank {} of {}",
+            best_ex,
+            sugg.len()
+        );
+    }
+
+    #[test]
+    fn apply_exchange_clears_exactly_those_tiles() {
+        let dict = load_default_dictionary().unwrap();
+        let mut s =
+            SolverState::from_cgp("15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15 QVWXZ?A")
+                .unwrap();
+        let rack = s.rack.tiles();
+        let mv = Move::exchange(&rack, t("QV?"), dict.leave_value(&t("WXZA"), Some(84)));
+        let board_before = s.board.clone();
+        s.apply_move(&mv);
+        assert_eq!(key(&s.rack.tiles()), key(&t("WXZA")));
+        for r in 0..15 {
+            for c in 0..15 {
+                assert_eq!(
+                    s.board.get_tile(r, c).map(|x| x.letter),
+                    board_before.get_tile(r, c).map(|x| x.letter)
+                );
+            }
+        }
     }
 }
