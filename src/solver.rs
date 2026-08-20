@@ -157,18 +157,16 @@ pub fn leave_value(leave: &[Tile]) -> f32 {
     leave_value_with_phase(leave, None)
 }
 
-/// Leave value with optional game-phase awareness.
+/// Per-letter heuristic leave value with game-phase scaling.
+///
+/// This is the fallback when no fitted leave table is loaded; prefer
+/// [`Dictionary::leave_value`], which uses the table when available.
 pub fn leave_value_with_phase(leave: &[Tile], unseen_count: Option<usize>) -> f32 {
     if leave.is_empty() {
         return 0.0;
     }
 
-    // Phase multiplier: leave matters less as the game ends
-    let phase_scale = match unseen_count {
-        Some(n) if n <= 7 => 0.25, // Endgame: leave barely matters
-        Some(n) if n <= 14 => 0.6, // Pre-endgame: leave somewhat matters
-        _ => 1.0,                  // Early/mid/late: full weight
-    };
+    let phase_scale = crate::dictionary::phase_scale(unseen_count);
 
     let mut value = 0.0;
     let mut vowels: i32 = 0;
@@ -378,6 +376,8 @@ struct Gen<'s, 'a> {
     placed_len: usize,
     /// Unseen tile count (bag + opponent rack) for leave phase scaling.
     unseen: usize,
+    /// Leave value per remaining-rack signature (at most 2^7 distinct).
+    leave_cache: HashMap<[u8; 27], f32>,
     moves: &'s mut Vec<Move>,
 }
 
@@ -433,6 +433,7 @@ impl<'a> Solver<'a> {
             }; RACK_SIZE],
             placed_len: 0,
             unseen,
+            leave_cache: HashMap::new(),
             moves: &mut moves,
         };
 
@@ -1054,7 +1055,18 @@ impl<'s, 'a> Gen<'s, 'a> {
             }
         }
 
-        let equity = score as f32 + leave_value_with_phase(&leave, Some(self.unseen));
+        let leave_val = match self.leave_cache.get(&self.rack) {
+            Some(&v) => v,
+            None => {
+                let v = self
+                    .solver
+                    .dictionary
+                    .leave_value(&leave, Some(self.unseen));
+                self.leave_cache.insert(self.rack, v);
+                v
+            }
+        };
+        let equity = score as f32 + leave_val;
         let (row, col) = self.rc(self.word_start);
 
         self.moves.push(Move {
