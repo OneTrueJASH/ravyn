@@ -136,6 +136,9 @@ impl Move {
     /// Board coordinates in the conventional notation: row number first for
     /// horizontal plays (`8D`), column letter first for vertical plays (`D8`).
     pub fn coords(&self) -> String {
+        if self.tiles_used.is_empty() {
+            return "-".to_string();
+        }
         let col_letter = (b'A' + self.col as u8) as char;
         match self.direction {
             Direction::Horizontal => format!("{}{}", self.row + 1, col_letter),

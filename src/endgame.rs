@@ -11,18 +11,30 @@
 //!
 //! **No go-out bonus:** Emptying your rack gives no bonus points.
 //!
-//! This means endgame strategy is a simple 2-ply problem:
-//! - For each of your candidate moves, find the opponent's best response
-//! - Rank by: your_score - opponent_best_response_score
+//! So once the bag is empty there are only two situations, and the caller
+//! (which knows who emptied the bag) picks one:
 //!
-//! For the absolute last move (opponent has 0 tiles), it's even simpler:
-//! just pick the highest-scoring play.
+//! - `opponent_has_turn = true`: the opponent emptied the bag. We play our
+//!   last turn and they play the final move. This is an exact 2-ply search:
+//!   for each of our moves (and for passing), apply it and find the
+//!   opponent's highest-scoring reply; rank by `our_score - their_best`.
+//!   The opponent's rack is fully known (it is every unseen tile).
+//! - `opponent_has_turn = false`: we emptied the bag and the opponent has
+//!   already taken their last turn. Our move ends the game: rank by score.
+//!
+//! Deeper search is deliberately absent — there are no further turns to
+//! search. See PRIMER.md and the project memory note on endgame rules.
 
-use crate::board::Board;
+use rayon::prelude::*;
+
+use crate::board::{Board, Direction};
 use crate::dictionary::Dictionary;
 use crate::logging::log;
 use crate::solver::{Move, Solver};
 use crate::tile::{Rack, Tile};
+
+/// Word used for the pass candidate in endgame results.
+pub const PASS_WORD: &str = "PASS";
 
 /// A move in the principal variation (the optimal 2-move sequence)
 #[derive(Debug, Clone)]
@@ -35,7 +47,7 @@ pub struct PvMove {
 /// Result of endgame evaluation for a single candidate move
 #[derive(Debug, Clone)]
 pub struct EndgameMove {
-    /// The move itself
+    /// The move itself (a pass has `tiles_used` empty and word [`PASS_WORD`])
     pub mv: Move,
     /// Net scoring advantage: our_score - opponent_best_response_score.
     /// For last-move (no opponent response), this equals the move score.
@@ -58,32 +70,12 @@ impl<'a> EndgameSolver<'a> {
         EndgameSolver { dictionary }
     }
 
-    /// Solve an endgame position where the opponent still has one turn.
+    /// Evaluate every move available to us with the bag empty.
     ///
-    /// This is the "opponent's last turn, then our last turn" case:
-    /// we are the player who emptied the bag, so opponent plays next,
-    /// then we get the final move.
-    ///
-    /// For each of our candidate moves (played on our final turn), we need
-    /// to know what the board looks like after the opponent's move. But we
-    /// don't know the opponent's move yet — they play BEFORE us.
-    ///
-    /// So the correct framing is:
-    /// - We're about to see the opponent play their last turn
-    /// - Then we play our last turn
-    /// - We want to evaluate: for every possible opponent move, what's our
-    ///   best response? But we can't control the opponent's move.
-    ///
-    /// **Actually, the caller decides context.** This solver handles two cases:
-    ///
-    /// ## Case 1: `opponent_has_turn = true` (2 ply)
-    /// We play first, opponent responds. For each of our moves:
-    /// - Apply our move to the board
-    /// - Find opponent's best scoring move on the resulting board
-    /// - endgame_value = our_score - opponent_best_score
-    ///
-    /// ## Case 2: `opponent_has_turn = false` (1 ply / last move)
-    /// We play last, no opponent response. Just rank by score.
+    /// `opponent_rack` must be the opponent's complete rack (all unseen
+    /// tiles). With `opponent_has_turn` the result includes a pass candidate,
+    /// since every play may open more for the opponent than it scores.
+    /// Results are sorted best first: by endgame value, then raw score.
     pub fn solve(
         &self,
         board: &Board,
@@ -96,82 +88,86 @@ impl<'a> EndgameSolver<'a> {
         for t in our_rack {
             rack.add(*t);
         }
-        let our_moves = solver.find_moves(&rack);
-        let total = our_moves.len();
+        let mut our_moves = solver.find_moves(&rack);
 
         log(&format!(
             "Endgame solver: {} candidate moves, {} our tiles, {} opp tiles, opponent_has_turn={}",
-            total,
+            our_moves.len(),
             our_rack.len(),
             opponent_rack.len(),
             opponent_has_turn
         ));
 
-        let mut results: Vec<EndgameMove> = Vec::with_capacity(total);
-
-        for mv in &our_moves {
-            if !opponent_has_turn {
-                // Last move — no opponent response. Pure score maximization.
-                let pv = vec![PvMove {
-                    word: mv.word.clone(),
-                    score: mv.score,
-                    player: 0,
-                }];
-                results.push(EndgameMove {
-                    mv: mv.clone(),
-                    endgame_value: mv.score as i32,
-                    pv,
-                    opponent_best_score: 0,
-                    opponent_best_word: String::new(),
-                });
-                continue;
-            }
-
-            // 2-ply: apply our move, then find opponent's best response
-            let mut new_board = board.clone();
-            for (r, c, tile) in &mv.tiles_used {
-                new_board.place_tile(*r, *c, *tile);
-            }
-
-            let opp_solver = Solver::new(&new_board, self.dictionary);
+        let mut results: Vec<EndgameMove> = if !opponent_has_turn {
+            // Our move ends the game: pure score maximization.
+            our_moves
+                .drain(..)
+                .map(|mv| {
+                    let pv = vec![PvMove {
+                        word: mv.word.clone(),
+                        score: mv.score,
+                        player: 0,
+                    }];
+                    EndgameMove {
+                        endgame_value: mv.score as i32,
+                        pv,
+                        opponent_best_score: 0,
+                        opponent_best_word: String::new(),
+                        mv,
+                    }
+                })
+                .collect()
+        } else {
+            our_moves.push(Self::pass_move(our_rack));
             let mut opp_rack = Rack::new();
             for t in opponent_rack {
                 opp_rack.add(*t);
             }
-            let opp_moves = opp_solver.find_moves(&opp_rack);
 
-            // Opponent picks their highest-scoring move (no further turns to
-            // plan for — this is their last turn, no tile penalties)
-            let best_opp = opp_moves.iter().max_by_key(|m| m.score);
+            // 2-ply: apply our move, then find the opponent's best reply.
+            // Candidates are independent, so evaluate them in parallel.
+            our_moves
+                .par_iter()
+                .map(|mv| {
+                    let mut new_board = board.clone();
+                    for (r, c, tile) in &mv.tiles_used {
+                        new_board.place_tile(*r, *c, *tile);
+                    }
 
-            let (opp_best_score, opp_best_word) = match best_opp {
-                Some(opp_mv) => (opp_mv.score, opp_mv.word.clone()),
-                None => (0, String::new()), // Opponent can't play — passes
-            };
+                    let opp_solver = Solver::new(&new_board, self.dictionary);
+                    let opp_moves = opp_solver.find_moves(&opp_rack);
 
-            let endgame_value = mv.score as i32 - opp_best_score as i32;
+                    // The opponent's move is the last of the game: they simply
+                    // take the most points (passing scores 0).
+                    let best_opp = opp_moves.iter().max_by_key(|m| m.score);
+                    let (opp_best_score, opp_best_word) = match best_opp {
+                        Some(opp_mv) => (opp_mv.score, opp_mv.word.clone()),
+                        None => (0, String::new()),
+                    };
 
-            let mut pv = vec![PvMove {
-                word: mv.word.clone(),
-                score: mv.score,
-                player: 0,
-            }];
-            if let Some(opp_mv) = best_opp {
-                pv.push(PvMove {
-                    word: opp_mv.word.clone(),
-                    score: opp_mv.score,
-                    player: 1,
-                });
-            }
+                    let mut pv = vec![PvMove {
+                        word: mv.word.clone(),
+                        score: mv.score,
+                        player: 0,
+                    }];
+                    if let Some(opp_mv) = best_opp {
+                        pv.push(PvMove {
+                            word: opp_mv.word.clone(),
+                            score: opp_mv.score,
+                            player: 1,
+                        });
+                    }
 
-            results.push(EndgameMove {
-                mv: mv.clone(),
-                endgame_value,
-                pv,
-                opponent_best_score: opp_best_score,
-                opponent_best_word: opp_best_word,
-            });
-        }
+                    EndgameMove {
+                        mv: mv.clone(),
+                        endgame_value: mv.score as i32 - opp_best_score as i32,
+                        pv,
+                        opponent_best_score: opp_best_score,
+                        opponent_best_word: opp_best_word,
+                    }
+                })
+                .collect()
+        };
 
         // Sort by endgame value descending, break ties by raw score
         results.sort_by(|a, b| {
@@ -180,18 +176,15 @@ impl<'a> EndgameSolver<'a> {
                 .then(b.mv.score.cmp(&a.mv.score))
         });
 
-        // Log summary
         log(&format!(
             "Endgame solver complete: {} moves evaluated",
             results.len()
         ));
         if let Some(best) = results.first() {
             log(&format!(
-                "Best: {} at ({},{}) {:?} score={} value={} (opp responds: {} for {})",
+                "Best: {} at {} score={} value={} (opp responds: {} for {})",
                 best.mv.word,
-                best.mv.row,
-                best.mv.col,
-                best.mv.direction,
+                best.mv.coords(),
                 best.mv.score,
                 best.endgame_value,
                 best.opponent_best_word,
@@ -200,6 +193,21 @@ impl<'a> EndgameSolver<'a> {
         }
 
         results
+    }
+
+    /// The pass candidate: no tiles placed, zero score, whole rack kept.
+    fn pass_move(our_rack: &[Tile]) -> Move {
+        Move {
+            word: PASS_WORD.to_string(),
+            row: 0,
+            col: 0,
+            direction: Direction::Horizontal,
+            score: 0,
+            tiles_used: Vec::new(),
+            is_bingo: false,
+            leave: our_rack.to_vec(),
+            equity: 0.0,
+        }
     }
 }
 
@@ -335,5 +343,66 @@ mod tests {
                 best_score_move.mv.word, best_score_move.endgame_value
             );
         }
+    }
+
+    /// The pass candidate is worth minus the opponent's best play on the
+    /// unchanged board, and every other candidate's value is its score
+    /// minus the opponent's best reply — recomputed here independently.
+    #[test]
+    fn test_pass_candidate_and_values_are_consistent() {
+        let dict = load_default_dictionary().unwrap();
+        let board = make_board_with_cat();
+
+        let our_rack = vec![Tile::new('Q'), Tile::new('I')];
+        let opp_rack = vec![Tile::new('Z'), Tile::new('A'), Tile::new('S')];
+
+        let solver = EndgameSolver::new(&dict);
+        let results = solver.solve(&board, &our_rack, &opp_rack, true);
+
+        let mut opp = Rack::new();
+        for t in &opp_rack {
+            opp.add(*t);
+        }
+        let best_reply = |b: &Board| -> u32 {
+            Solver::new(b, &dict)
+                .find_moves(&opp)
+                .iter()
+                .map(|m| m.score)
+                .max()
+                .unwrap_or(0)
+        };
+
+        let pass = results
+            .iter()
+            .find(|r| r.mv.word == PASS_WORD)
+            .expect("pass candidate present when the opponent replies");
+        assert!(pass.mv.tiles_used.is_empty());
+        assert_eq!(pass.mv.score, 0);
+        assert_eq!(pass.mv.coords(), "-");
+        assert_eq!(pass.endgame_value, -(best_reply(&board) as i32));
+        assert_eq!(pass.mv.leave.len(), our_rack.len());
+
+        for r in &results {
+            let mut b = board.clone();
+            for (row, col, t) in &r.mv.tiles_used {
+                b.place_tile(*row, *col, *t);
+            }
+            assert_eq!(
+                r.endgame_value,
+                r.mv.score as i32 - best_reply(&b) as i32,
+                "{} at {}",
+                r.mv.word,
+                r.mv.coords()
+            );
+        }
+
+        // Sorted best first.
+        for pair in results.windows(2) {
+            assert!(pair[0].endgame_value >= pair[1].endgame_value);
+        }
+
+        // Without an opponent turn there is no pass candidate.
+        let last = solver.solve(&board, &our_rack, &opp_rack, false);
+        assert!(last.iter().all(|r| r.mv.word != PASS_WORD));
     }
 }
