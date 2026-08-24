@@ -107,6 +107,105 @@ pub fn exchange_moves(rack: &[Tile], dictionary: &Dictionary, unseen: Option<usi
     moves
 }
 
+/// Estimate how much equity the opponent gave up with an observed play:
+/// the gap between the best move available and the move they made,
+/// averaged over sampled completions of their hidden rack.
+///
+/// `prev_board` is the board before their move, `placed` the tiles it put
+/// down, `score` its score, and `pool` the unseen tiles now (their rack
+/// plus the bag), which is exactly the set their kept tiles came from.
+/// Their rack is completed by joining the played tiles with `7 - played`
+/// tiles sampled uniformly from the pool; for each completion the best
+/// play (and exchange, when the bag allowed one) is generated on the
+/// pre-move board and compared with the observed move's equity. Returns
+/// `None` when no full rack can be reconstructed.
+pub fn observed_move_loss(
+    prev_board: &Board,
+    placed: &[(usize, usize, Tile)],
+    score: u32,
+    pool: &HashMap<char, u32>,
+    dictionary: &Dictionary,
+    samples: usize,
+    seed: u64,
+) -> Option<f32> {
+    if placed.is_empty() || placed.len() > RACK_SIZE {
+        return None;
+    }
+    let kept_size = RACK_SIZE - placed.len();
+    let mut pool_tiles: Vec<Tile> = Vec::new();
+    for (&letter, &count) in pool {
+        for _ in 0..count {
+            pool_tiles.push(if letter == '?' {
+                Tile::blank(' ')
+            } else {
+                Tile::new(letter)
+            });
+        }
+    }
+    if pool_tiles.len() < kept_size {
+        return None;
+    }
+    // Canonical order so the same seed samples the same completions.
+    pool_tiles.sort_by_key(|t| (t.is_blank, t.letter));
+
+    let played: Vec<Tile> = placed
+        .iter()
+        .map(|(_, _, t)| if t.is_blank { Tile::blank(' ') } else { *t })
+        .collect();
+    let prev_count = (0..BOARD_SIZE)
+        .flat_map(|r| (0..BOARD_SIZE).map(move |c| (r, c)))
+        .filter(|&(r, c)| prev_board.get_tile(r, c).is_some())
+        .count();
+    // The unseen count from their side of the table when they moved, and
+    // the bag size then (they had not yet redrawn).
+    let their_unseen = TOTAL_TILES.saturating_sub(prev_count + RACK_SIZE);
+    let bag_then = (pool_tiles.len() + placed.len()).saturating_sub(RACK_SIZE);
+
+    let solver = Solver::new(prev_board, dictionary);
+    let mut rng = fastrand::Rng::with_seed(seed);
+    let mut total_loss = 0.0f32;
+    let mut measured = 0usize;
+    for _ in 0..samples {
+        rng.shuffle(&mut pool_tiles);
+        let kept = &pool_tiles[..kept_size];
+        let mut rack_tiles = played.clone();
+        rack_tiles.extend_from_slice(kept);
+        let mut rack = Rack::new();
+        for t in &rack_tiles {
+            rack.add(*t);
+        }
+
+        let best_play = solver
+            .find_moves(&rack)
+            .into_iter()
+            .map(|m| m.equity)
+            .next();
+        let best_exchange = if bag_then >= EXCHANGE_MIN_BAG {
+            exchange_moves(&rack_tiles, dictionary, Some(their_unseen))
+                .into_iter()
+                .map(|m| m.equity)
+                .fold(None, |acc: Option<f32>, e| {
+                    Some(acc.map_or(e, |a| a.max(e)))
+                })
+        } else {
+            None
+        };
+        let best = match (best_play, best_exchange) {
+            (Some(p), Some(e)) => p.max(e),
+            (Some(p), None) => p,
+            (None, Some(e)) => e,
+            (None, None) => continue,
+        };
+        let observed = score as f32 + dictionary.leave_value(kept, Some(their_unseen));
+        total_loss += (best - observed).max(0.0);
+        measured += 1;
+    }
+    if measured == 0 {
+        return None;
+    }
+    Some(total_loss / measured as f32)
+}
+
 /// The solver state - tracks board and rack for finding optimal plays
 #[derive(Clone)]
 pub struct SolverState {
@@ -649,6 +748,46 @@ mod tests {
             best_ex,
             sugg.len()
         );
+    }
+
+    /// The measured loss is deterministic for a seed, never negative, and
+    /// bigger for a worse observed move: the same placement reported with
+    /// a lower score loses exactly the score difference more (the sampled
+    /// completions and thus the best alternatives are identical).
+    #[test]
+    fn observed_move_loss_ranks_worse_moves_higher() {
+        let dict = load_default_dictionary().unwrap();
+        let state =
+            SolverState::from_cgp("15/15/15/15/15/15/15/3BEECH7/15/15/15/15/15/15/15 AAA").unwrap();
+        // The opponent hooked two tiles onto BEECH.
+        let placed = vec![
+            (6usize, 3usize, Tile::new('T')),
+            (8usize, 3usize, Tile::new('I')),
+        ];
+        let mut pool = HashMap::new();
+        pool.insert('A', 3u32);
+        pool.insert('E', 3);
+        pool.insert('R', 2);
+        pool.insert('S', 2);
+        pool.insert('T', 2);
+        pool.insert('N', 2);
+        pool.insert('O', 2);
+
+        let good = observed_move_loss(&state.board, &placed, 30, &pool, &dict, 8, 11).unwrap();
+        let bad = observed_move_loss(&state.board, &placed, 2, &pool, &dict, 8, 11).unwrap();
+        assert!(good >= 0.0);
+        assert!(bad > good, "lower score must measure a bigger loss");
+        assert!(
+            bad - good <= 28.0 + 1e-3,
+            "the gap is bounded by the score difference"
+        );
+
+        let again = observed_move_loss(&state.board, &placed, 30, &pool, &dict, 8, 11).unwrap();
+        assert_eq!(good, again, "same seed, same measurement");
+
+        // A rack that cannot be completed measures nothing.
+        let empty_pool = HashMap::new();
+        assert!(observed_move_loss(&state.board, &placed, 30, &empty_pool, &dict, 8, 11).is_none());
     }
 
     #[test]
