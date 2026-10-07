@@ -5,7 +5,7 @@
 use crate::tile::Tile;
 
 /// Side length of the square game board.
-pub(crate) const BOARD_SIZE: usize = 15;
+pub const BOARD_SIZE: usize = 15;
 
 /// Premium square types on the Crossplay board
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

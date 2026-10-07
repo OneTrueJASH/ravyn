@@ -98,7 +98,9 @@ impl LeaveValues {
         Self::parse(&bytes)
     }
 
-    fn parse(bytes: &[u8]) -> Result<Self> {
+    /// Parse the bytes of a `.klv2` file (the file contents are untrusted:
+    /// every count and index is checked; fuzzed in `fuzz/`).
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
         let u32_at = |off: usize| -> Result<u32> {
             bytes
                 .get(off..off + 4)

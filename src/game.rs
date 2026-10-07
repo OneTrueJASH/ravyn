@@ -11,10 +11,10 @@ use crate::solver::{rack_counts, tiles_from_counts, LeaveTable, Move, Solver, EX
 use crate::tile::{Rack, Tile, RACK_SIZE};
 
 /// Total number of tiles in a standard Crossplay game.
-pub(crate) const TOTAL_TILES: usize = 100;
+pub const TOTAL_TILES: usize = 100;
 
 /// Number of blank (wildcard) tiles in the distribution.
-pub(crate) const BLANK_COUNT: usize = 3;
+pub const BLANK_COUNT: usize = 3;
 
 /// Tile distribution for Crossplay (100 tiles)
 fn standard_distribution() -> HashMap<char, u32> {
@@ -247,7 +247,7 @@ pub fn observed_move_loss(
 }
 
 /// The solver state - tracks board and rack for finding optimal plays
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SolverState {
     pub board: Board,
     pub rack: Rack,

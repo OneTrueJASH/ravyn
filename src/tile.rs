@@ -3,7 +3,7 @@
 //! Crossplay uses different point values than standard Scrabble.
 
 /// Number of tile slots in a player's rack.
-pub(crate) const RACK_SIZE: usize = 7;
+pub const RACK_SIZE: usize = 7;
 
 /// Represents a single tile
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,31 @@
+[package]
+name = "cpsolver2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# The parsers under test are pure Rust; leave RefEngine out of fuzz builds.
+cpsolver2 = { path = "..", default-features = false }
+
+# Keep this crate out of the main crate's build.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "leaves_parse"
+path = "fuzz_targets/leaves_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "from_cgp"
+path = "fuzz_targets/from_cgp.rs"
+test = false
+doc = false
+bench = false
