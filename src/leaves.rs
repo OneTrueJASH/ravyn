@@ -38,7 +38,7 @@ const TABLE_BINGO_BONUS: f32 = 50.0;
 /// `p = sigmoid(bias + sum(weight[letter] * count))`, blank at index 26.
 ///
 /// Fitted 2026-08-20 by `cargo test --release study_bingo_probability --
-/// --ignored --nocapture` in `mcts.rs`: 24,549 sampled leaves (0-6 tiles)
+/// --ignored --nocapture` in `mcts/studies.rs`: 24,549 sampled leaves (0-6 tiles)
 /// from 400 self-play games, log-loss 0.425 against 0.485 for a constant
 /// 18.9%. Single-tile probabilities: blank 0.587, S 0.273, R 0.226,
 /// E 0.207, Q 0.014, J 0.025. The fit is linear in counts, so multi-tile
