@@ -75,7 +75,6 @@ impl<'a> EndgameSolver<'a> {
     /// tiles). With `opponent_has_turn` the result includes a pass candidate,
     /// since every play may open more for the opponent than it scores.
     /// Results are sorted best first: by endgame value, then raw score.
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub fn solve(
         &self,
         board: &Board,

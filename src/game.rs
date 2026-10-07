@@ -58,7 +58,6 @@ fn standard_distribution() -> HashMap<char, u32> {
 }
 
 /// Every tile in a fresh bag, in distribution order.
-#[cfg_attr(not(test), allow(dead_code))] // self-play studies and library consumers
 pub fn full_tile_set() -> Vec<Tile> {
     let mut dist: Vec<(char, u32)> = standard_distribution().into_iter().collect();
     dist.sort();
@@ -427,7 +426,6 @@ impl SolverState {
     /// are runs of empty squares, uppercase letters are tiles and lowercase
     /// letters are blanks designated as that letter. Only the board and our
     /// rack are read; anything after them is ignored.
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub fn from_cgp(cgp: &str) -> Result<Self, String> {
         let mut sections = cgp.split_whitespace();
         let board_str = sections.next().ok_or("empty CGP")?;

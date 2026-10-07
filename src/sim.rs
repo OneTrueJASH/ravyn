@@ -160,7 +160,6 @@ impl ArmStats {
     }
 
     /// The per-iteration spread values (for tests and paired comparisons).
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub fn values(&self) -> &[f32] {
         &self.values
     }
@@ -199,7 +198,6 @@ pub struct SimSnapshot {
     /// Arms with at least one playout.
     pub simulated: usize,
     /// Arms at or above the playout floor.
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub floored: usize,
     /// Arms in total.
     pub total: usize,
@@ -223,7 +221,6 @@ pub struct SimState {
 
 impl SimState {
     /// Playouts saved in this state.
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub fn playouts(&self) -> u64 {
         self.playouts
     }
@@ -640,7 +637,6 @@ impl<'a> Simulation<'a> {
     }
 
     /// Per-arm statistics (tests).
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub fn stats(&self) -> &[ArmStats] {
         &self.stats
     }
