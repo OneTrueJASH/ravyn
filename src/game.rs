@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::board::{Board, BOARD_SIZE};
 use crate::dictionary::Dictionary;
-use crate::solver::{Move, Solver, EXCHANGE_MIN_BAG};
+use crate::solver::{rack_counts, tiles_from_counts, LeaveTable, Move, Solver, EXCHANGE_MIN_BAG};
 use crate::tile::{Rack, Tile, RACK_SIZE};
 
 /// Total number of tiles in a standard Crossplay game.
@@ -107,6 +107,60 @@ pub fn exchange_moves(rack: &[Tile], dictionary: &Dictionary, unseen: Option<usi
     moves
 }
 
+/// Every distinct exchange from `rack` as (kept-subset index, equity),
+/// enumerated through the rack's subset leave table without building
+/// moves. The full rack (nothing exchanged) is excluded.
+fn exchange_values<'d>(
+    rack: &[Tile],
+    dictionary: &'d Dictionary,
+    unseen: Option<usize>,
+) -> (LeaveTable<'d>, Vec<(usize, f32)>) {
+    let mut table = LeaveTable::new(rack_counts(rack), dictionary, unseen);
+    let full = table.full_index();
+    let values = (0..full).map(|i| (i, table.value(i))).collect();
+    (table, values)
+}
+
+/// The exchange that keeps the subset at `kept_index`.
+fn exchange_from_subset(rack: &[Tile], table: &LeaveTable, kept_index: usize, equity: f32) -> Move {
+    let kept = table.subset_counts(kept_index);
+    let mut exchanged = rack_counts(rack);
+    for (e, k) in exchanged.iter_mut().zip(kept) {
+        *e -= k;
+    }
+    Move::exchange(rack, tiles_from_counts(&exchanged), equity)
+}
+
+/// The best exchange by the leave value of the tiles kept (the same
+/// valuation as [`exchange_moves`]), building only that one move.
+pub fn best_exchange(
+    rack: &[Tile],
+    dictionary: &Dictionary,
+    unseen: Option<usize>,
+) -> Option<Move> {
+    let (table, values) = exchange_values(rack, dictionary, unseen);
+    let &(index, equity) = values
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    Some(exchange_from_subset(rack, &table, index, equity))
+}
+
+/// The `k` best exchanges, best first, building only those moves.
+pub fn top_exchanges(
+    rack: &[Tile],
+    dictionary: &Dictionary,
+    unseen: Option<usize>,
+    k: usize,
+) -> Vec<Move> {
+    let (table, mut values) = exchange_values(rack, dictionary, unseen);
+    values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    values
+        .iter()
+        .take(k)
+        .map(|&(index, equity)| exchange_from_subset(rack, &table, index, equity))
+        .collect()
+}
+
 /// Estimate how much equity the opponent gave up with an observed play:
 /// the gap between the best move available and the move they made,
 /// averaged over sampled completions of their hidden rack.
@@ -170,23 +224,10 @@ pub fn observed_move_loss(
         let kept = &pool_tiles[..kept_size];
         let mut rack_tiles = played.clone();
         rack_tiles.extend_from_slice(kept);
-        let mut rack = Rack::new();
-        for t in &rack_tiles {
-            rack.add(*t);
-        }
 
-        let best_play = solver
-            .find_moves(&rack)
-            .into_iter()
-            .map(|m| m.equity)
-            .next();
+        let best_play = solver.best_move_by_equity(&rack_tiles).map(|m| m.equity);
         let best_exchange = if bag_then >= EXCHANGE_MIN_BAG {
-            exchange_moves(&rack_tiles, dictionary, Some(their_unseen))
-                .into_iter()
-                .map(|m| m.equity)
-                .fold(None, |acc: Option<f32>, e| {
-                    Some(acc.map_or(e, |a| a.max(e)))
-                })
+            best_exchange(&rack_tiles, dictionary, Some(their_unseen)).map(|m| m.equity)
         } else {
             None
         };

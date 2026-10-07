@@ -72,8 +72,10 @@ pub fn bingo_probability(leave: &[Tile]) -> f32 {
 /// bingo probability relative to drawing seven fresh tiles. First order
 /// only (the following turn's bingo chances are not adjusted).
 pub fn bingo_bonus_correction(leave: &[Tile], bingo_bonus: u32) -> f32 {
+    // The empty leave's probability is a constant of the model.
+    static P0: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| bingo_probability(&[]));
     let p = bingo_probability(leave);
-    let p0 = bingo_probability(&[]);
+    let p0 = *P0;
     (bingo_bonus as f32 - TABLE_BINGO_BONUS) * (p - p0)
 }
 

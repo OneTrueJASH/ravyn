@@ -11,10 +11,8 @@
 
 use std::collections::HashMap;
 
-use fst::raw::Node;
-
 use crate::board::{Board, Direction, Premium, BOARD_SIZE};
-use crate::dictionary::Dictionary;
+use crate::dictionary::{DawgNode, Dictionary};
 use crate::game::TOTAL_TILES;
 use crate::tile::{letter_value, Rack, Tile, RACK_SIZE};
 
@@ -334,6 +332,174 @@ struct Placed {
     is_blank: bool,
 }
 
+/// Leave values for every sub-multiset of one rack, indexed by subset.
+///
+/// A rack of at most seven tiles has at most 2^7 = 128 sub-multisets. Each
+/// distinct tile kind gets a digit in a mixed-radix index (0..=count), so
+/// taking a tile is one subtraction and a lookup is one array read; values
+/// are computed lazily the first time a subset is seen.
+pub(crate) struct LeaveTable<'d> {
+    dictionary: &'d Dictionary,
+    unseen: Option<usize>,
+    /// Index weight of one tile of each kind (blank at 26); 0 if absent.
+    strides: [u16; 27],
+    /// Count of each kind in the full rack.
+    counts: [u8; 27],
+    /// Index of the full rack (every tile kept).
+    full: usize,
+    values: [f32; 128],
+    known: u128,
+}
+
+impl<'d> LeaveTable<'d> {
+    pub(crate) fn new(counts: [u8; 27], dictionary: &'d Dictionary, unseen: Option<usize>) -> Self {
+        let mut strides = [0u16; 27];
+        let mut stride = 1u16;
+        let mut full = 0usize;
+        for (idx, &c) in counts.iter().enumerate() {
+            if c > 0 {
+                strides[idx] = stride;
+                full += c as usize * stride as usize;
+                stride *= c as u16 + 1;
+            }
+        }
+        debug_assert!(stride as usize <= 128, "a rack holds at most 7 tiles");
+        LeaveTable {
+            dictionary,
+            unseen,
+            strides,
+            counts,
+            full,
+            values: [0.0; 128],
+            known: 0,
+        }
+    }
+
+    /// Index of the full rack.
+    #[inline]
+    pub(crate) fn full_index(&self) -> usize {
+        self.full
+    }
+
+    /// Index change for taking one tile of kind `idx` off the rack.
+    #[inline]
+    pub(crate) fn stride(&self, idx: usize) -> usize {
+        self.strides[idx] as usize
+    }
+
+    /// Tile counts of the subset at `index`.
+    pub(crate) fn subset_counts(&self, mut index: usize) -> [u8; 27] {
+        let mut out = [0u8; 27];
+        // Digits from the most significant kind down.
+        for idx in (0..27).rev() {
+            let stride = self.strides[idx] as usize;
+            if stride == 0 {
+                continue;
+            }
+            out[idx] = (index / stride) as u8;
+            index %= stride;
+        }
+        debug_assert!(out.iter().zip(&self.counts).all(|(o, c)| o <= c));
+        out
+    }
+
+    /// Leave value of the subset at `index`.
+    #[inline]
+    pub(crate) fn value(&mut self, index: usize) -> f32 {
+        if self.known & (1u128 << index) == 0 {
+            let tiles = tiles_from_counts(&self.subset_counts(index));
+            self.values[index] = self.dictionary.leave_value(&tiles, self.unseen);
+            self.known |= 1u128 << index;
+        }
+        self.values[index]
+    }
+}
+
+/// Tiles for a count array (blanks at index 26, undesignated).
+pub(crate) fn tiles_from_counts(counts: &[u8; 27]) -> Vec<Tile> {
+    let mut tiles = Vec::with_capacity(RACK_SIZE);
+    for (idx, &count) in counts.iter().enumerate() {
+        for _ in 0..count {
+            tiles.push(if idx == BLANK_IDX {
+                Tile::blank(' ')
+            } else {
+                Tile::new(index_letter(idx))
+            });
+        }
+    }
+    tiles
+}
+
+/// Per-kind tile counts of `tiles` (blanks at index 26).
+pub(crate) fn rack_counts(tiles: &[Tile]) -> [u8; 27] {
+    let mut counts = [0u8; 27];
+    for t in tiles {
+        if t.is_blank {
+            counts[BLANK_IDX] += 1;
+        } else if let Some(idx) = letter_index(t.letter) {
+            counts[idx] += 1;
+        }
+    }
+    counts
+}
+
+/// Everything needed to rebuild a found play as a [`Move`] later, kept in
+/// fixed-size arrays so the best-move searches allocate nothing until the
+/// winners are known.
+#[derive(Clone, Copy)]
+struct Snapshot {
+    placed: [Placed; RACK_SIZE],
+    n: usize,
+    word: [u8; BOARD_SIZE],
+    word_len: usize,
+    word_start: usize,
+    lane: usize,
+    dir: Direction,
+    /// Leave-table index of the tiles kept.
+    leave_index: usize,
+    score: u32,
+    /// Score plus leave value (`NAN` in score-only searches until rebuilt).
+    equity: f32,
+}
+
+impl Snapshot {
+    #[inline]
+    fn rc(&self, pos: usize) -> (usize, usize) {
+        match self.dir {
+            Direction::Horizontal => (self.lane, pos),
+            Direction::Vertical => (pos, self.lane),
+        }
+    }
+
+    /// Ordering used for "better by equity": higher equity, then higher
+    /// score (the order `find_moves` sorts by).
+    #[inline]
+    fn beats_by_equity(&self, other: &Snapshot) -> bool {
+        self.equity > other.equity || (self.equity == other.equity && self.score > other.score)
+    }
+
+    /// The single square and tile of a one-tile play.
+    fn single_tile_key(&self) -> Option<(usize, usize, usize, bool)> {
+        (self.n == 1).then(|| {
+            let p = self.placed[0];
+            let (r, c) = self.rc(p.pos);
+            (r, c, p.letter, p.is_blank)
+        })
+    }
+}
+
+/// What a search keeps of the plays it finds.
+enum Sink {
+    /// Every play, as a `Move` (the full move list).
+    All(Vec<Move>),
+    /// The highest-scoring play only.
+    BestScore(Option<Snapshot>),
+    /// The play with the highest equity only.
+    BestEquity(Option<Snapshot>),
+    /// The `k` plays with the highest equity, best first.
+    TopEquity { k: usize, kept: Vec<Snapshot> },
+}
+
 /// Mutable search state for one `find_moves` call.
 struct Gen<'s, 'a> {
     solver: &'s Solver<'a>,
@@ -355,11 +521,10 @@ struct Gen<'s, 'a> {
     word_len: usize,
     placed: [Placed; RACK_SIZE],
     placed_len: usize,
-    /// Unseen tile count (bag + opponent rack) for leave phase scaling.
-    unseen: usize,
-    /// Leave value per remaining-rack signature (at most 2^7 distinct).
-    leave_cache: HashMap<[u8; 27], f32>,
-    moves: &'s mut Vec<Move>,
+    /// Leave values per remaining-rack subset, and the current subset.
+    leaves: LeaveTable<'a>,
+    leave_index: usize,
+    sink: Sink,
 }
 
 impl<'a> Solver<'a> {
@@ -377,24 +542,141 @@ impl<'a> Solver<'a> {
     /// that form words in both directions are reported once, labelled with
     /// the longer word.
     pub fn find_moves(&self, rack: &Rack) -> Vec<Move> {
-        let tiles = rack.tiles();
-        if tiles.is_empty() {
+        self.find_moves_for(&rack.tiles())
+    }
+
+    /// [`Self::find_moves`] for a rack given as tiles.
+    pub fn find_moves_for(&self, tiles: &[Tile]) -> Vec<Move> {
+        let Sink::All(mut moves) = self.generate(tiles, Sink::All(Vec::new())) else {
+            unreachable!("the sink comes back as it went in");
+        };
+        Self::dedup_single_tile_plays(&mut moves);
+
+        // Sort by equity descending (strategic value = score + leave value),
+        // breaking ties by raw score so the order is stable across runs.
+        moves.sort_by(|a, b| {
+            b.equity
+                .partial_cmp(&a.equity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.score.cmp(&a.score))
+        });
+
+        moves
+    }
+
+    /// The highest-scoring play (the first found among equal scores), or
+    /// `None` if there is no play. Builds only that one move.
+    pub fn best_move_by_score(&self, tiles: &[Tile]) -> Option<Move> {
+        let Sink::BestScore(best) = self.generate(tiles, Sink::BestScore(None)) else {
+            unreachable!("the sink comes back as it went in");
+        };
+        best.map(|snap| self.materialize(tiles, &snap))
+    }
+
+    /// The score of the highest-scoring play, or 0 when there is none
+    /// (passing). Builds no moves at all.
+    pub fn best_score(&self, tiles: &[Tile]) -> u32 {
+        let Sink::BestScore(best) = self.generate(tiles, Sink::BestScore(None)) else {
+            unreachable!("the sink comes back as it went in");
+        };
+        best.map_or(0, |snap| snap.score)
+    }
+
+    /// The play `find_moves` would list first: highest equity, then highest
+    /// score. Builds only that one move.
+    pub fn best_move_by_equity(&self, tiles: &[Tile]) -> Option<Move> {
+        let Sink::BestEquity(best) = self.generate(tiles, Sink::BestEquity(None)) else {
+            unreachable!("the sink comes back as it went in");
+        };
+        best.map(|snap| self.materialize(tiles, &snap))
+    }
+
+    /// The `k` plays with the highest equity, best first, in the order
+    /// `find_moves` would list them (single-tile duplicates removed the
+    /// same way). Builds only those moves.
+    pub fn top_moves_by_equity(&self, tiles: &[Tile], k: usize) -> Vec<Move> {
+        if k == 0 {
             return Vec::new();
+        }
+        let sink = Sink::TopEquity {
+            k,
+            kept: Vec::with_capacity(k + 1),
+        };
+        let Sink::TopEquity { kept, .. } = self.generate(tiles, sink) else {
+            unreachable!("the sink comes back as it went in");
+        };
+        kept.iter()
+            .map(|snap| self.materialize(tiles, snap))
+            .collect()
+    }
+
+    /// Unseen tiles from the mover's side (bag + other rack), the phase
+    /// indicator for leave values.
+    fn unseen_for(info: &BoardInfo, rack_len: usize) -> usize {
+        TOTAL_TILES.saturating_sub(info.tile_count + rack_len)
+    }
+
+    /// Rebuild a [`Move`] from a snapshot taken during the search.
+    fn materialize(&self, tiles: &[Tile], snap: &Snapshot) -> Move {
+        let counts = rack_counts(tiles);
+        let tile_count = (0..BOARD_SIZE)
+            .flat_map(|r| (0..BOARD_SIZE).map(move |c| (r, c)))
+            .filter(|&(r, c)| self.board.get_tile(r, c).is_some())
+            .count();
+        let unseen = TOTAL_TILES.saturating_sub(tile_count + tiles.len());
+        let mut leaves = LeaveTable::new(counts, self.dictionary, Some(unseen));
+        self.materialize_with(snap, &mut leaves)
+    }
+
+    /// [`Self::materialize`] with the rack's leave table already built.
+    fn materialize_with(&self, snap: &Snapshot, leaves: &mut LeaveTable) -> Move {
+        let leave_val = leaves.value(snap.leave_index);
+        let leave = tiles_from_counts(&leaves.subset_counts(snap.leave_index));
+
+        let word: String = snap.word[..snap.word_len]
+            .iter()
+            .map(|&i| index_letter(i as usize))
+            .collect();
+        let tiles_used: Vec<(usize, usize, Tile)> = snap.placed[..snap.n]
+            .iter()
+            .map(|p| {
+                let (r, c) = snap.rc(p.pos);
+                let letter = index_letter(p.letter);
+                let tile = if p.is_blank {
+                    Tile::blank(letter)
+                } else {
+                    Tile::new(letter)
+                };
+                (r, c, tile)
+            })
+            .collect();
+        let (row, col) = snap.rc(snap.word_start);
+        Move {
+            kind: MoveKind::Play,
+            word,
+            row,
+            col,
+            direction: snap.dir,
+            score: snap.score,
+            tiles_used,
+            is_bingo: snap.n == RACK_SIZE,
+            leave,
+            equity: snap.score as f32 + leave_val,
+        }
+    }
+
+    /// Run the anchor search for `tiles`, handing every play to `sink`.
+    fn generate(&self, tiles: &[Tile], sink: Sink) -> Sink {
+        if tiles.is_empty() {
+            return sink;
         }
 
         let info = self.analyze_board();
-        let unseen = TOTAL_TILES.saturating_sub(info.tile_count + tiles.len());
+        let unseen = Self::unseen_for(&info, tiles.len());
+        let counts = rack_counts(tiles);
+        let leaves = LeaveTable::new(counts, self.dictionary, Some(unseen));
+        let leave_index = leaves.full_index();
 
-        let mut counts = [0u8; 27];
-        for t in &tiles {
-            if t.is_blank {
-                counts[BLANK_IDX] += 1;
-            } else if let Some(idx) = letter_index(t.letter) {
-                counts[idx] += 1;
-            }
-        }
-
-        let mut moves = Vec::new();
         let mut gen = Gen {
             solver: self,
             info: &info,
@@ -413,9 +695,9 @@ impl<'a> Solver<'a> {
                 is_blank: false,
             }; RACK_SIZE],
             placed_len: 0,
-            unseen,
-            leave_cache: HashMap::new(),
-            moves: &mut moves,
+            leaves,
+            leave_index,
+            sink,
         };
 
         // On the first turn the board is symmetric, so every vertical play
@@ -445,18 +727,7 @@ impl<'a> Solver<'a> {
             }
         }
 
-        Self::dedup_single_tile_plays(&mut moves);
-
-        // Sort by equity descending (strategic value = score + leave value),
-        // breaking ties by raw score so the order is stable across runs.
-        moves.sort_by(|a, b| {
-            b.equity
-                .partial_cmp(&a.equity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.score.cmp(&a.score))
-        });
-
-        moves
+        gen.sink
     }
 
     /// Score a set of placed tiles against the current board.
@@ -682,11 +953,9 @@ impl<'a> Solver<'a> {
         }
 
         let mut mask = 0u32;
-        for t in node.transitions() {
-            let Some(idx) = letter_index(t.inp as char) else {
-                continue;
-            };
-            let mut n = dict.node_at(t.addr);
+        for arc in dict.arcs(node) {
+            let idx = arc.letter as usize;
+            let mut n = arc.node();
             let mut ok = true;
             for &b in &suffix[..suffix_len] {
                 match dict.child(n, b) {
@@ -815,7 +1084,7 @@ impl<'s, 'a> Gen<'s, 'a> {
     /// Recursively build left parts (tiles placed before the anchor), and for
     /// each one — including the empty left part — extend rightwards from
     /// the anchor.
-    fn left_part(&mut self, node: Node<'a>, limit: usize) {
+    fn left_part(&mut self, node: DawgNode, limit: usize) {
         self.attach_left_part_and_extend(node);
 
         if limit == 0 {
@@ -823,10 +1092,8 @@ impl<'s, 'a> Gen<'s, 'a> {
         }
 
         let dict = self.solver.dictionary;
-        for t in node.transitions() {
-            let Some(idx) = letter_index(t.inp as char) else {
-                continue;
-            };
+        for arc in dict.arcs(node) {
+            let idx = arc.letter as usize;
             let is_blank = if self.rack[idx] > 0 {
                 false
             } else if self.rack[BLANK_IDX] > 0 {
@@ -836,6 +1103,8 @@ impl<'s, 'a> Gen<'s, 'a> {
             };
             let take = if is_blank { BLANK_IDX } else { idx };
             self.rack[take] -= 1;
+            let stride = self.leaves.stride(take);
+            self.leave_index -= stride;
             self.word[self.word_len] = idx as u8;
             self.word_len += 1;
             self.placed[self.placed_len] = Placed {
@@ -845,17 +1114,18 @@ impl<'s, 'a> Gen<'s, 'a> {
             };
             self.placed_len += 1;
 
-            self.left_part(dict.node_at(t.addr), limit - 1);
+            self.left_part(arc.node(), limit - 1);
 
             self.placed_len -= 1;
             self.word_len -= 1;
+            self.leave_index += stride;
             self.rack[take] += 1;
         }
     }
 
     /// Assign board squares to the current left part (it ends just before
     /// the anchor), accumulate its score, and extend right from the anchor.
-    fn attach_left_part_and_extend(&mut self, node: Node<'a>) {
+    fn attach_left_part_and_extend(&mut self, node: DawgNode) {
         let len = self.placed_len;
         let start = self.anchor_pos - len;
         self.word_start = start;
@@ -883,7 +1153,7 @@ impl<'s, 'a> Gen<'s, 'a> {
 
     fn extend_right(
         &mut self,
-        node: Node<'a>,
+        node: DawgNode,
         pos: usize,
         main_sum: u32,
         word_mult: u32,
@@ -934,10 +1204,8 @@ impl<'s, 'a> Gen<'s, 'a> {
         let lm = premium.letter_multiplier();
         let wm = premium.word_multiplier();
 
-        for t in node.transitions() {
-            let Some(idx) = letter_index(t.inp as char) else {
-                continue;
-            };
+        for arc in dict.arcs(node) {
+            let idx = arc.letter as usize;
             if mask & (1 << idx) == 0 {
                 continue;
             }
@@ -966,6 +1234,8 @@ impl<'s, 'a> Gen<'s, 'a> {
             };
 
             self.rack[take] -= 1;
+            let stride = self.leaves.stride(take);
+            self.leave_index -= stride;
             self.word[self.word_len] = idx as u8;
             self.word_len += 1;
             self.placed[self.placed_len] = Placed {
@@ -976,7 +1246,7 @@ impl<'s, 'a> Gen<'s, 'a> {
             self.placed_len += 1;
 
             self.extend_right(
-                dict.node_at(t.addr),
+                arc.node(),
                 pos + 1,
                 main_sum + placed_value,
                 word_mult * wm,
@@ -985,11 +1255,15 @@ impl<'s, 'a> Gen<'s, 'a> {
 
             self.placed_len -= 1;
             self.word_len -= 1;
+            self.leave_index += stride;
             self.rack[take] += 1;
         }
     }
 
-    /// Record the current word as a move. `raw_score` excludes the bingo bonus.
+    /// Record the current word as a play. `raw_score` excludes the bingo
+    /// bonus. What happens next depends on the sink: the full move list
+    /// builds a `Move`; the best-move searches only compare and keep a
+    /// fixed-size snapshot.
     fn record(&mut self, raw_score: u32) {
         let n = self.placed_len;
         let mut score = raw_score;
@@ -1006,62 +1280,65 @@ impl<'s, 'a> Gen<'s, 'a> {
             score = (score as i64 + delta).max(0) as u32;
         }
 
-        let word: String = self.word[..self.word_len]
-            .iter()
-            .map(|&i| index_letter(i as usize))
-            .collect();
+        let mut snap = Snapshot {
+            placed,
+            n,
+            word: self.word,
+            word_len: self.word_len,
+            word_start: self.word_start,
+            lane: self.lane,
+            dir: self.dir,
+            leave_index: self.leave_index,
+            score,
+            equity: f32::NAN,
+        };
 
-        let tiles_used: Vec<(usize, usize, Tile)> = placed[..n]
-            .iter()
-            .map(|p| {
-                let (r, c) = self.rc(p.pos);
-                let letter = index_letter(p.letter);
-                let tile = if p.is_blank {
-                    Tile::blank(letter)
-                } else {
-                    Tile::new(letter)
-                };
-                (r, c, tile)
-            })
-            .collect();
-
-        let mut leave = Vec::with_capacity(self.rack_len - n);
-        for (idx, &count) in self.rack.iter().enumerate() {
-            for _ in 0..count {
-                if idx == BLANK_IDX {
-                    leave.push(Tile::blank(' '));
-                } else {
-                    leave.push(Tile::new(index_letter(idx)));
+        match &mut self.sink {
+            Sink::BestScore(best) => {
+                if best.is_none_or(|b| score > b.score) {
+                    *best = Some(snap);
                 }
+                return;
             }
+            Sink::All(_) | Sink::BestEquity(_) | Sink::TopEquity { .. } => {}
         }
 
-        let leave_val = match self.leave_cache.get(&self.rack) {
-            Some(&v) => v,
-            None => {
-                let v = self
-                    .solver
-                    .dictionary
-                    .leave_value(&leave, Some(self.unseen));
-                self.leave_cache.insert(self.rack, v);
-                v
+        snap.equity = score as f32 + self.leaves.value(self.leave_index);
+        match &mut self.sink {
+            Sink::All(moves) => {
+                let mv = self.solver.materialize_with(&snap, &mut self.leaves);
+                moves.push(mv);
             }
-        };
-        let equity = score as f32 + leave_val;
-        let (row, col) = self.rc(self.word_start);
-
-        self.moves.push(Move {
-            kind: MoveKind::Play,
-            word,
-            row,
-            col,
-            direction: self.dir,
-            score,
-            tiles_used,
-            is_bingo: n == RACK_SIZE,
-            leave,
-            equity,
-        });
+            Sink::BestEquity(best) => {
+                if best.is_none_or(|b| snap.beats_by_equity(&b)) {
+                    *best = Some(snap);
+                }
+            }
+            Sink::TopEquity { k, kept } => {
+                let k = *k;
+                if kept.len() == k && !snap.beats_by_equity(&kept[k - 1]) {
+                    return;
+                }
+                // A one-tile play forming words both ways is found once per
+                // direction; keep one copy, labelled with the longer word,
+                // as `find_moves` does.
+                if let Some(key) = snap.single_tile_key() {
+                    if let Some(i) = kept.iter().position(|o| o.single_tile_key() == Some(key)) {
+                        if kept[i].word_len >= snap.word_len {
+                            return;
+                        }
+                        kept.remove(i);
+                    }
+                }
+                let at = kept
+                    .iter()
+                    .position(|o| snap.beats_by_equity(o))
+                    .unwrap_or(kept.len());
+                kept.insert(at, snap);
+                kept.truncate(k);
+            }
+            Sink::BestScore(_) => unreachable!("handled above"),
+        }
     }
 
     /// When a letter appears among the placed tiles both as a real tile and
@@ -1645,41 +1922,85 @@ mod tests {
         assert_eq!(retains.coords(), "8D");
     }
 
-    /// Timing harness for move generation. Run with
-    /// `cargo test --release bench_movegen -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn bench_movegen() {
-        use crate::game::SolverState;
-        use std::time::Instant;
+    fn tiles_key(m: &Move) -> Vec<(usize, usize, char, bool)> {
+        let mut k: Vec<_> = m
+            .tiles_used
+            .iter()
+            .map(|(r, c, t)| (*r, *c, t.letter, t.is_blank))
+            .collect();
+        k.sort();
+        k
+    }
 
+    /// The best-move searches must agree with the full move list: the same
+    /// best play by equity, the same best score, and the same top-k plays
+    /// in the same order. Exchanges likewise against `exchange_moves`.
+    #[test]
+    fn best_move_searches_match_the_full_list() {
+        use crate::game::{best_exchange, exchange_moves, top_exchanges, SolverState};
         let Some(dict) = crate::datafiles::test_data::dictionary() else {
             return;
         };
         const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
         const BEECH: &str = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15";
         const END: &str = "3N3Q3M3/3OP2UNTEACH1/3BE2O3N3/3LA2T2MYOPE/2FeR2H1LO4/2O6AB4/2R1F4U3De/2TRIVET1D3AY/4LA1A1IODIZE/4KI1JINX2ES/5R1E1G4O/OUTIES1S3G2R/11L2E/8WAHINES/2EGAlITE2A3";
-        let positions = [
-            (
-                "empty AEINRST",
-                "15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 AEINRST".to_string(),
-            ),
-            ("midgame JSIRATU", format!("{} JSIRATU", MID)),
-            ("endgame RCVSDW", format!("{} RCVSDW", END)),
-            ("beech AEIO?ST", format!("{} AEIO?ST", BEECH)),
-            ("beech ??EINRS", format!("{} ??EINRS", BEECH)),
-        ];
-        for (name, cgp) in &positions {
-            let state = SolverState::from_cgp(cgp).unwrap();
+        const EMPTY: &str = "15/15/15/15/15/15/15/15/15/15/15/15/15/15/15";
+        for (board, rack) in [
+            (EMPTY, "AEINRST"),
+            (EMPTY, "?EINRST"),
+            (MID, "JSIRATU"),
+            (MID, "AEESTTU"),
+            (BEECH, "AEIO?ST"),
+            (BEECH, "SS?ZEAA"),
+            (BEECH, "QVVWWXZ"),
+            (END, "RCVSDW"),
+            (END, "Q"),
+        ] {
+            let state = SolverState::from_cgp(&format!("{} {}", board, rack)).unwrap();
             let solver = Solver::new(&state.board, &dict);
-            let _ = solver.find_moves(&state.rack);
-            let iters = 20;
-            let t = Instant::now();
-            let mut n = 0;
-            for _ in 0..iters {
-                n = solver.find_moves(&state.rack).len();
+            let tiles = state.rack.tiles();
+            let all = solver.find_moves(&state.rack);
+            let label = format!("{} / {}", &board[..10], rack);
+
+            let best = solver.best_move_by_equity(&tiles);
+            assert_eq!(best.is_some(), !all.is_empty(), "{label}");
+            if let (Some(best), Some(first)) = (&best, all.first()) {
+                assert_eq!(tiles_key(best), tiles_key(first), "{label}");
+                assert_eq!(best.score, first.score, "{label}");
+                assert_eq!(best.equity, first.equity, "{label}");
+                assert_eq!(best.word, first.word, "{label}");
+                assert_eq!(best.leave.len(), first.leave.len(), "{label}");
             }
-            println!("{:18} {:6} moves  {:?}/call", name, n, t.elapsed() / iters);
+
+            let max_score = all.iter().map(|m| m.score).max().unwrap_or(0);
+            assert_eq!(solver.best_score(&tiles), max_score, "{label}");
+            if let Some(by_score) = solver.best_move_by_score(&tiles) {
+                assert_eq!(by_score.score, max_score, "{label}");
+            }
+
+            for k in [1, 5, 16] {
+                let top = solver.top_moves_by_equity(&tiles, k);
+                assert_eq!(top.len(), k.min(all.len()), "{label} k={k}");
+                for (a, b) in top.iter().zip(&all) {
+                    assert_eq!(a.equity, b.equity, "{label} k={k}");
+                    assert_eq!(a.score, b.score, "{label} k={k}");
+                }
+            }
+
+            let exchanges = exchange_moves(&tiles, &dict, Some(60));
+            let mut eqs: Vec<f32> = exchanges.iter().map(|m| m.equity).collect();
+            eqs.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            let best_ex = best_exchange(&tiles, &dict, Some(60));
+            assert_eq!(best_ex.map(|m| m.equity), eqs.first().copied(), "{label}");
+            let top_ex = top_exchanges(&tiles, &dict, Some(60), 8);
+            let top_eqs: Vec<f32> = top_ex.iter().map(|m| m.equity).collect();
+            assert_eq!(top_eqs, eqs[..eqs.len().min(8)].to_vec(), "{label}");
+            for m in &top_ex {
+                let MoveKind::Exchange(out) = &m.kind else {
+                    panic!("not an exchange");
+                };
+                assert_eq!(out.len() + m.leave.len(), tiles.len(), "{label}");
+            }
         }
     }
 }

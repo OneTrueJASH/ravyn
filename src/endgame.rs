@@ -134,10 +134,6 @@ impl<'a> EndgameSolver<'a> {
                 .collect()
         } else {
             our_moves.push(Move::pass(our_rack));
-            let mut opp_rack = Rack::new();
-            for t in opponent_rack {
-                opp_rack.add(*t);
-            }
 
             // 2-ply: apply our move, then find the opponent's best reply.
             // Candidates are independent, so evaluate them in parallel.
@@ -152,13 +148,12 @@ impl<'a> EndgameSolver<'a> {
                         new_board.place_tile(*r, *c, *tile);
                     }
 
-                    let opp_solver = Solver::new(&new_board, self.dictionary);
-                    let opp_moves = opp_solver.find_moves(&opp_rack);
-
                     // The opponent's move is the last of the game: they simply
-                    // take the most points (passing scores 0).
-                    let best_opp = opp_moves.iter().max_by_key(|m| m.score);
-                    let (opp_best_score, opp_best_word) = match best_opp {
+                    // take the most points (passing scores 0). Only that one
+                    // reply is built.
+                    let opp_solver = Solver::new(&new_board, self.dictionary);
+                    let best_opp = opp_solver.best_move_by_score(opponent_rack);
+                    let (opp_best_score, opp_best_word) = match &best_opp {
                         Some(opp_mv) => (opp_mv.score, opp_mv.word.clone()),
                         None => (0, String::new()),
                     };
@@ -168,7 +163,7 @@ impl<'a> EndgameSolver<'a> {
                         score: mv.score,
                         player: 0,
                     }];
-                    if let Some(opp_mv) = best_opp {
+                    if let Some(opp_mv) = &best_opp {
                         pv.push(PvMove {
                             word: opp_mv.word.clone(),
                             score: opp_mv.score,
