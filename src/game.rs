@@ -476,6 +476,51 @@ impl SolverState {
         Ok(state)
     }
 
+    /// The board in CGP notation: rows separated by `/`, runs of empty
+    /// squares as numbers, blanks as lowercase letters.
+    pub fn board_cgp(&self) -> String {
+        let mut cgp = String::new();
+        for row in 0..BOARD_SIZE {
+            if row > 0 {
+                cgp.push('/');
+            }
+            let mut empty = 0;
+            for col in 0..BOARD_SIZE {
+                match self.board.get_tile(row, col) {
+                    Some(tile) => {
+                        if empty > 0 {
+                            cgp.push_str(&empty.to_string());
+                            empty = 0;
+                        }
+                        cgp.push(if tile.is_blank {
+                            tile.letter.to_ascii_lowercase()
+                        } else {
+                            tile.letter
+                        });
+                    }
+                    None => empty += 1,
+                }
+            }
+            if empty > 0 {
+                cgp.push_str(&empty.to_string());
+            }
+        }
+        cgp
+    }
+
+    /// The position as a CGP line: board, our rack (blank `?`) with the
+    /// opponent's unknown, scores (ours/theirs) and the zero-turn count.
+    /// [`Self::from_cgp`] reads it back.
+    pub fn to_cgp(&self, scores: (u32, u32)) -> String {
+        let rack: String = self
+            .rack
+            .tiles()
+            .iter()
+            .map(|t| if t.is_blank { '?' } else { t.letter })
+            .collect();
+        format!("{} {}/ {}/{} 0", self.board_cgp(), rack, scores.0, scores.1)
+    }
+
     /// Reset everything
     pub fn reset(&mut self) {
         self.board = Board::new();
