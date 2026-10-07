@@ -25,6 +25,8 @@
 //! Deeper search is deliberately absent — there are no further turns to
 //! search. See PRIMER.md and the project memory note on endgame rules.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use rayon::prelude::*;
 
 use crate::board::Board;
@@ -73,6 +75,7 @@ impl<'a> EndgameSolver<'a> {
     /// tiles). With `opponent_has_turn` the result includes a pass candidate,
     /// since every play may open more for the opponent than it scores.
     /// Results are sorted best first: by endgame value, then raw score.
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests and library consumers
     pub fn solve(
         &self,
         board: &Board,
@@ -80,6 +83,21 @@ impl<'a> EndgameSolver<'a> {
         opponent_rack: &[Tile],
         opponent_has_turn: bool,
     ) -> Vec<EndgameMove> {
+        self.solve_cancellable(board, our_rack, opponent_rack, opponent_has_turn, None)
+            .unwrap_or_default()
+    }
+
+    /// As [`Self::solve`], checking `cancel` before each of our moves is
+    /// searched. Returns `None` if the search was cancelled.
+    pub fn solve_cancellable(
+        &self,
+        board: &Board,
+        our_rack: &[Tile],
+        opponent_rack: &[Tile],
+        opponent_has_turn: bool,
+        cancel: Option<&AtomicBool>,
+    ) -> Option<Vec<EndgameMove>> {
+        let cancelled = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
         let solver = Solver::new(board, self.dictionary);
         let mut rack = Rack::new();
         for t in our_rack {
@@ -123,9 +141,12 @@ impl<'a> EndgameSolver<'a> {
 
             // 2-ply: apply our move, then find the opponent's best reply.
             // Candidates are independent, so evaluate them in parallel.
-            our_moves
+            let evaluated: Option<Vec<EndgameMove>> = our_moves
                 .par_iter()
                 .map(|mv| {
+                    if cancelled() {
+                        return None;
+                    }
                     let mut new_board = board.clone();
                     for (r, c, tile) in &mv.tiles_used {
                         new_board.place_tile(*r, *c, *tile);
@@ -155,16 +176,20 @@ impl<'a> EndgameSolver<'a> {
                         });
                     }
 
-                    EndgameMove {
+                    Some(EndgameMove {
                         mv: mv.clone(),
                         endgame_value: mv.score as i32 - opp_best_score as i32,
                         pv,
                         opponent_best_score: opp_best_score,
                         opponent_best_word: opp_best_word,
-                    }
+                    })
                 })
-                .collect()
+                .collect();
+            evaluated?
         };
+        if cancelled() {
+            return None;
+        }
 
         // Sort by endgame value descending, break ties by raw score
         results.sort_by(|a, b| {
@@ -189,7 +214,7 @@ impl<'a> EndgameSolver<'a> {
             ));
         }
 
-        results
+        Some(results)
     }
 }
 
