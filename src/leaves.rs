@@ -290,15 +290,13 @@ impl LeaveValues {
 mod tests {
     use super::*;
 
-    const KLV_PATH: &str = "external/refengine/data/lexica/NWL23.klv2";
-
     #[test]
     fn loads_and_indexes_consistently() {
-        if !std::path::Path::new(KLV_PATH).exists() {
-            eprintln!("KLV2 file not present; skipping");
+        let Some(klv_path) = crate::datafiles::test_data::file(crate::datafiles::LEAVES_KLV2)
+        else {
             return;
-        }
-        let lv = LeaveValues::load(KLV_PATH).expect("leave table parses");
+        };
+        let lv = LeaveValues::load(klv_path).expect("leave table parses");
         assert_eq!(lv.len(), 914_624);
 
         // Well-known orderings from any leave table: a blank beats an S

@@ -452,7 +452,6 @@ impl Default for SolverState {
 mod tests {
     use super::*;
     use crate::board::Direction;
-    use crate::dictionary::load_default_dictionary;
     use crate::solver::{Move, MoveKind};
     use crate::tile::Tile;
 
@@ -669,7 +668,9 @@ mod tests {
 
     #[test]
     fn test_get_suggestions() {
-        let dict = load_default_dictionary().expect("dictionary should load");
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
 
         let mut state = SolverState::new();
         state.place_tile(7, 6, 'C', false);
@@ -691,7 +692,9 @@ mod tests {
 
     #[test]
     fn exchange_moves_complete_and_distinct() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let rack = t("AABC??D");
         let moves = exchange_moves(&rack, &dict, Some(80));
         // distinct multisets: A:0-2 (3) * B (2) * C (2) * ?:0-2 (3) * D (2) - 1 = 71
@@ -715,7 +718,9 @@ mod tests {
 
     #[test]
     fn get_suggestions_exchanges_only_with_bag_of_seven() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         // MID board: 87 tiles; rack AEST -> unseen 9 -> bag 2: no exchanges.
         const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
         let s = SolverState::from_cgp(&format!("{} AEST", MID)).unwrap();
@@ -756,7 +761,9 @@ mod tests {
     /// completions and thus the best alternatives are identical).
     #[test]
     fn observed_move_loss_ranks_worse_moves_higher() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let state =
             SolverState::from_cgp("15/15/15/15/15/15/15/3BEECH7/15/15/15/15/15/15/15 AAA").unwrap();
         // The opponent hooked two tiles onto BEECH.
@@ -792,7 +799,9 @@ mod tests {
 
     #[test]
     fn apply_exchange_clears_exactly_those_tiles() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let mut s =
             SolverState::from_cgp("15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15 QVWXZ?A")
                 .unwrap();

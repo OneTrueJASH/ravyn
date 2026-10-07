@@ -196,7 +196,6 @@ impl<'a> EndgameSolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dictionary::load_default_dictionary;
     use crate::solver::PASS_WORD;
 
     fn make_board_with_cat() -> Board {
@@ -210,7 +209,9 @@ mod tests {
     #[test]
     fn test_last_move_pure_score() {
         // When opponent has no turn remaining, just maximize score
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = make_board_with_cat();
 
         let our_rack = vec![Tile::new('S'), Tile::new('X')];
@@ -245,7 +246,9 @@ mod tests {
     #[test]
     fn test_two_ply_opponent_response() {
         // With opponent having a turn, we should consider their response
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = make_board_with_cat();
 
         let our_rack = vec![Tile::new('S')];
@@ -288,7 +291,9 @@ mod tests {
         // A lower-scoring move that blocks the opponent's best play
         // should rank higher than a higher-scoring move that leaves
         // the opponent a big scoring opportunity
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = make_board_with_cat();
 
         // Give us S and opponent X — opponent wants premium squares
@@ -333,7 +338,9 @@ mod tests {
     /// minus the opponent's best reply — recomputed here independently.
     #[test]
     fn test_pass_candidate_and_values_are_consistent() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = make_board_with_cat();
 
         let our_rack = vec![Tile::new('Q'), Tile::new('I')];

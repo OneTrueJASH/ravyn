@@ -1132,12 +1132,13 @@ impl<'s, 'a> Gen<'s, 'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dictionary::load_default_dictionary;
     use std::collections::HashSet;
 
     #[test]
     fn test_solver_first_turn() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = Board::new();
 
         // Create a rack with letters to spell "CAT"
@@ -1179,7 +1180,9 @@ mod tests {
 
     #[test]
     fn test_solver_with_existing_tiles() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let mut board = Board::new();
 
         // Place "CAT" horizontally at (7, 7)
@@ -1207,7 +1210,9 @@ mod tests {
 
     #[test]
     fn test_solver_extensions() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let mut board = Board::new();
 
         // Place "CAT" horizontally at (7, 7)
@@ -1242,7 +1247,9 @@ mod tests {
 
     #[test]
     fn test_cross_word_validation() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let mut board = Board::new();
 
         // Place "CAT" horizontally at (7, 7)
@@ -1306,7 +1313,9 @@ mod tests {
     /// the solver to miss plays that needed the blank at a later position.
     #[test]
     fn test_blank_ordering_does_not_affect_play_set() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = Board::new(); // first turn
 
         // Rack 1: blank FIRST, then regular tiles
@@ -1352,7 +1361,9 @@ mod tests {
     /// Test that blank tiles enable plays with letters not in the rack.
     #[test]
     fn test_blank_enables_missing_letters() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = Board::new();
 
         // Rack with blank and common letters but no Z, X, J, Q
@@ -1387,7 +1398,9 @@ mod tests {
     /// Test blank plays on a populated board with cross-check constraints.
     #[test]
     fn test_blank_with_cross_checks() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let mut board = Board::new();
 
         // Place "WORD" horizontally at (7, 6)-(7, 9)
@@ -1444,7 +1457,9 @@ mod tests {
     /// scores most (the blank is worth 0 regardless of premium).
     #[test]
     fn test_blank_goes_on_cheaper_square() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = Board::new();
 
         // Property check: for every move, swapping the blank flag between two
@@ -1519,7 +1534,9 @@ mod tests {
     /// scorer used for opponent moves.
     #[test]
     fn test_incremental_score_matches_standalone() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let mut board = Board::new();
         board.place_tile(7, 3, Tile::new('B'));
         board.place_tile(7, 4, Tile::new('E'));
@@ -1557,7 +1574,9 @@ mod tests {
     /// Each distinct tile placement must appear exactly once.
     #[test]
     fn test_no_duplicate_placements() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let mut board = Board::new();
         board.place_tile(7, 6, Tile::new('C'));
         board.place_tile(7, 7, Tile::new('A'));
@@ -1604,7 +1623,9 @@ mod tests {
 
     #[test]
     fn test_bingo_bonus_and_leave() {
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         let board = Board::new();
         let mut rack = Rack::new();
         for ch in ['R', 'E', 'T', 'A', 'I', 'N', 'S'] {
@@ -1632,7 +1653,9 @@ mod tests {
         use crate::game::SolverState;
         use std::time::Instant;
 
-        let dict = load_default_dictionary().unwrap();
+        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+            return;
+        };
         const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
         const BEECH: &str = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15";
         const END: &str = "3N3Q3M3/3OP2UNTEACH1/3BE2O3N3/3LA2T2MYOPE/2FeR2H1LO4/2O6AB4/2R1F4U3De/2TRIVET1D3AY/4LA1A1IODIZE/4KI1JINX2ES/5R1E1G4O/OUTIES1S3G2R/11L2E/8WAHINES/2EGAlITE2A3";

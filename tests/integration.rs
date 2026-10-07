@@ -5,15 +5,26 @@
 //! components work together correctly.
 
 use cpsolver2::board::Board;
-use cpsolver2::dictionary::{load_default_dictionary, Dictionary};
+use cpsolver2::datafiles::{file_status, FileStatus, WORDS_FST};
+use cpsolver2::dictionary::{load_dictionary_from, Dictionary};
 use cpsolver2::endgame::EndgameSolver;
 use cpsolver2::game::SolverState;
 use cpsolver2::solver::MoveKind;
 use cpsolver2::tile::Tile;
 
-/// Load the dictionary once for tests that need it.
-fn dict() -> Dictionary {
-    load_default_dictionary().expect("dictionary must be loadable for integration tests")
+/// The dictionary from the crate root (independent of the working
+/// directory), or `None` with a message when the data file is missing or
+/// is a Git LFS pointer stub, so the calling test skips.
+fn dict() -> Option<Dictionary> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    match file_status(&root.join(WORDS_FST)) {
+        FileStatus::Present => {}
+        status => {
+            eprintln!("skipping: {} is {:?}", WORDS_FST, status);
+            return None;
+        }
+    }
+    Some(load_dictionary_from(root).expect("dictionary must load"))
 }
 
 // ---------------------------------------------------------------------------
@@ -22,7 +33,9 @@ fn dict() -> Dictionary {
 
 #[test]
 fn test_full_solve_flow() {
-    let dictionary = dict();
+    let Some(dictionary) = dict() else {
+        return;
+    };
 
     // Set up a board with "CAT" placed horizontally at row 7.
     let mut state = SolverState::new();
@@ -94,7 +107,9 @@ fn test_full_solve_flow() {
 
 #[test]
 fn test_endgame_solve_flow() {
-    let dictionary = dict();
+    let Some(dictionary) = dict() else {
+        return;
+    };
 
     // Create a board with "CAT" placed so there are anchor points.
     let mut board = Board::new();
@@ -145,7 +160,9 @@ fn test_endgame_solve_flow() {
 
 #[test]
 fn test_move_apply_and_resolve() {
-    let dictionary = dict();
+    let Some(dictionary) = dict() else {
+        return;
+    };
 
     // Place "CAT" on the board, give ourselves an "S" to extend to "CATS".
     let mut state = SolverState::new();
@@ -227,7 +244,9 @@ fn test_unseen_tile_tracking() {
     );
 
     // Apply a move that places the S on the board.
-    let dictionary = dict();
+    let Some(dictionary) = dict() else {
+        return;
+    };
     let moves = state.get_suggestions(&dictionary);
 
     // Find a move that uses at least 1 rack tile.
@@ -359,7 +378,9 @@ fn test_endgame_detection() {
 
 #[test]
 fn test_blank_tile_move_generation() {
-    let dictionary = dict();
+    let Some(dictionary) = dict() else {
+        return;
+    };
 
     // Place "AT" on the board to give the solver something to hook onto.
     let mut state = SolverState::new();
