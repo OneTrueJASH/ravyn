@@ -105,14 +105,25 @@ impl LeaveValues {
         };
 
         let node_count = u32_at(0)? as usize;
+        // The count comes from the file: check it against the file's
+        // length before reserving memory for it.
+        let nodes_end = node_count
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(4))
+            .filter(|&end| end <= bytes.len())
+            .context("leave file declares more nodes than it holds")?;
         let mut nodes = Vec::with_capacity(node_count);
         for i in 0..node_count {
             nodes.push(u32_at(4 + i * 4)?);
         }
-        let values_off = 4 + node_count * 4;
+        let values_off = nodes_end;
         let value_count = u32_at(values_off)? as usize;
         let data_off = values_off + 4;
-        if bytes.len() < data_off + value_count * 4 {
+        let fits = value_count
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(data_off))
+            .is_some_and(|end| end <= bytes.len());
+        if !fits {
             bail!("leave file is shorter than its declared value count");
         }
         let values: Vec<f32> = (0..value_count)
@@ -355,6 +366,13 @@ mod tests {
     fn rejects_garbage() {
         assert!(LeaveValues::parse(&[]).is_err());
         assert!(LeaveValues::parse(&[1, 0, 0, 0]).is_err());
+        // A huge declared node count is rejected before any allocation.
+        assert!(LeaveValues::parse(&[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]).is_err());
+        // So is a huge declared value count.
+        let mut huge_values = vec![1, 0, 0, 0];
+        huge_values.extend_from_slice(&IS_END.to_le_bytes());
+        huge_values.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(LeaveValues::parse(&huge_values).is_err());
         // One node pointing at itself with an accepting bit: a cycle.
         let mut bytes = vec![2, 0, 0, 0];
         bytes.extend_from_slice(&(1u32 | IS_END).to_le_bytes()); // root -> node 1
