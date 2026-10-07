@@ -2,6 +2,7 @@
 //! two-ply ending, and the cut-off valuation.
 
 use super::*;
+use crate::board::{Direction, BOARD_SIZE};
 
 #[cfg(test)]
 pub(super) fn rack_from(tiles: &[Tile]) -> Rack {
@@ -348,21 +349,39 @@ impl<'a> Playout<'a> {
     pub(super) fn best_last_turn(&self, p: Player) -> (Option<Move>, i32) {
         let solver = Solver::new(&self.board, self.dict_for(p));
         let other_rack = self.rack(p.other());
-        let mut moves = solver.find_moves_for(self.rack(p));
-        moves.sort_by_key(|m| std::cmp::Reverse(m.score));
 
         // Only the reply's score matters, so no reply moves are built.
         let reply_score =
             |board: &Board| -> i32 { Solver::new(board, self.dict).best_score(other_rack) as i32 };
 
+        // The other player's best replies on the current board. One still
+        // legal after our move scores the same there, so it bounds their
+        // reply from below: value(mv) <= mv.score - that score.
+        let mut base_replies = Solver::new(&self.board, self.dict).find_moves_for(other_rack);
+        base_replies.sort_by_key(|m| std::cmp::Reverse(m.score));
+        base_replies.truncate(REPLY_BOUND_CANDIDATES);
+
         // Passing: the other player replies on the unchanged board.
-        let mut best_value = -reply_score(&self.board);
+        let mut best_value = -(base_replies.first().map_or(0, |m| m.score as i32));
         let mut best_move = None;
 
-        for mv in moves {
-            // value = score - reply <= score, so once scores drop to the
-            // best value found nothing further can improve on it.
-            if (mv.score as i32) <= best_value {
+        let mut moves: Vec<(i32, Move)> = solver
+            .find_moves_for(self.rack(p))
+            .into_iter()
+            .map(|mv| {
+                let floor = base_replies
+                    .iter()
+                    .find(|r| reply_survives(&self.board, r, &mv.tiles_used))
+                    .map_or(0, |r| r.score as i32);
+                (mv.score as i32 - floor, mv)
+            })
+            .collect();
+        // Highest bound first; ties by score keep the old order.
+        moves.sort_by_key(|(bound, mv)| (std::cmp::Reverse(*bound), std::cmp::Reverse(mv.score)));
+
+        for (bound, mv) in moves {
+            // Nothing from here on can beat the best value found.
+            if bound <= best_value {
                 break;
             }
             let mut board = self.board.clone();
@@ -532,4 +551,61 @@ pub(crate) struct PlayoutOutcome {
     pub(crate) finished: bool,
     /// Tiles left in the bag where the playout stopped.
     pub(crate) bag: usize,
+}
+
+/// How many of the other player's best current-board replies
+/// `best_last_turn` tries as a lower bound on their reply after our move.
+const REPLY_BOUND_CANDIDATES: usize = 12;
+
+/// Whether `reply`, legal on `board`, stays legal with the same score once
+/// `ours` is placed: none of our tiles lands on its squares or just past
+/// either end of its main word or of any cross-word it forms. Every other
+/// square it reads is unchanged.
+fn reply_survives(board: &Board, reply: &Move, ours: &[(usize, usize, Tile)]) -> bool {
+    let n = BOARD_SIZE as i32;
+    let is_ours = |r: i32, c: i32| {
+        ours.iter()
+            .any(|&(or, oc, _)| or as i32 == r && oc as i32 == c)
+    };
+    let placed = |r: i32, c: i32| {
+        reply
+            .tiles_used
+            .iter()
+            .any(|&(pr, pc, _)| pr as i32 == r && pc as i32 == c)
+    };
+    let filled = |r: i32, c: i32| {
+        (0..n).contains(&r)
+            && (0..n).contains(&c)
+            && (!board.is_empty(r as usize, c as usize) || placed(r, c))
+    };
+    // The squares just past both ends of the run through (r, c) along (dr, dc).
+    let run_ends_clear = |r: i32, c: i32, dr: i32, dc: i32| {
+        let (mut a, mut b) = ((r, c), (r, c));
+        while filled(a.0 - dr, a.1 - dc) {
+            a = (a.0 - dr, a.1 - dc);
+        }
+        while filled(b.0 + dr, b.1 + dc) {
+            b = (b.0 + dr, b.1 + dc);
+        }
+        !is_ours(a.0 - dr, a.1 - dc) && !is_ours(b.0 + dr, b.1 + dc)
+    };
+    let (dr, dc) = match reply.direction {
+        Direction::Horizontal => (0, 1),
+        Direction::Vertical => (1, 0),
+    };
+    let Some(&(r0, c0, _)) = reply.tiles_used.first() else {
+        return true;
+    };
+    if reply
+        .tiles_used
+        .iter()
+        .any(|&(r, c, _)| is_ours(r as i32, c as i32))
+    {
+        return false;
+    }
+    run_ends_clear(r0 as i32, c0 as i32, dr, dc)
+        && reply
+            .tiles_used
+            .iter()
+            .all(|&(r, c, _)| run_ends_clear(r as i32, c as i32, dc, dr))
 }

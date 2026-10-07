@@ -665,3 +665,49 @@ fn exchange_candidates_evaluate() {
     assert_eq!(sim.pool.len(), 84);
     assert_eq!(sim.bag_size, 77);
 }
+
+/// `best_last_turn` prunes with a lower bound on the reply (a current-board
+/// reply our move leaves intact). It must return exactly the value of the
+/// unpruned 2-ply search, on many positions, racks with blanks included.
+#[test]
+fn bounded_last_turn_matches_exhaustive_search() {
+    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        return;
+    };
+    let exhaustive = |p: &Playout, who: Player| -> i32 {
+        let reply =
+            |board: &Board| Solver::new(board, &dict).best_score(p.rack(who.other())) as i32;
+        let mut best = -reply(&p.board);
+        for mv in Solver::new(&p.board, &dict).find_moves_for(p.rack(who)) {
+            let mut board = p.board.clone();
+            for (r, c, t) in &mv.tiles_used {
+                board.place_tile(*r, *c, *t);
+            }
+            best = best.max(mv.score as i32 - reply(&board));
+        }
+        best
+    };
+    let mut checked = 0;
+    for seed in 0..8u64 {
+        let mut game = Playout::new_game(&dict, seed);
+        let mut who = Player::Us;
+        for _ in 0..30 {
+            if game.bag.len() < 30 {
+                for side in [Player::Us, Player::Opp] {
+                    let (_, value) = game.best_last_turn(side);
+                    assert_eq!(value, exhaustive(&game, side), "seed {seed}");
+                    checked += 1;
+                }
+            }
+            let Some(mv) = game.best_by_score(who) else {
+                break;
+            };
+            game.commit(who, &mv);
+            if game.bag.is_empty() {
+                break;
+            }
+            who = who.other();
+        }
+    }
+    assert!(checked > 40, "only {checked} positions checked");
+}
