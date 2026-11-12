@@ -1,6 +1,11 @@
 //! Engine-versus-engine self-play matches (`examples/selfplay.rs`).
 
-use super::*;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+use crate::dictionary::Dictionary;
+
+use super::playout::{Player, Playout, SimChoice};
+use super::pool::iteration_seed;
 
 /// One side of a self-play match: how it values leaves (through its
 /// dictionary's leave table and phase scaling), whether it may pass when

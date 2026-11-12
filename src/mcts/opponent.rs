@@ -1,7 +1,11 @@
 //! The opponent model: inference-weighted deals and the measured
 //! softmax temperature of the simulated opponent.
 
-use super::*;
+use fastrand::Rng;
+
+use crate::tile::{Tile, RACK_SIZE};
+
+use super::pool::{Fnv, TilePool};
 
 /// Model of the opponent for playouts: how their hidden rack is dealt and
 /// how strongly they play. The default deals uniformly and plays perfect

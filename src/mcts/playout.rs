@@ -1,8 +1,17 @@
 //! One simulated game under Crossplay rules: move policies, the exact
 //! two-ply ending, and the cut-off valuation.
 
-use super::*;
-use crate::board::{Direction, BOARD_SIZE};
+use fastrand::Rng;
+
+use crate::board::{Board, Direction, BOARD_SIZE};
+use crate::dictionary::Dictionary;
+use crate::game::{best_exchange, full_tile_set, top_exchanges, SolverState};
+use crate::solver::{Move, MoveKind, Solver, EXCHANGE_MIN_BAG};
+#[cfg(test)]
+use crate::tile::Rack;
+use crate::tile::{Tile, RACK_SIZE};
+
+use super::eval::{MctsConfig, MctsEvaluator};
 
 #[cfg(test)]
 pub(super) fn rack_from(tiles: &[Tile]) -> Rack {

@@ -1,7 +1,10 @@
 //! The unseen-tile pool, fingerprints of positions, and the seeds that
 //! make playout `i` the same deal for every candidate.
 
-use super::*;
+use fastrand::Rng;
+
+use crate::game::SolverState;
+use crate::tile::Tile;
 
 /// Pool of available tiles for random drawing
 pub struct TilePool {

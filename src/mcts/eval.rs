@@ -1,7 +1,22 @@
 //! The fixed-budget evaluator: candidates played out in batches, with
 //! paired-difference pruning between rounds.
 
-use super::*;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use fastrand::Rng;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+
+use crate::board::Board;
+use crate::dictionary::Dictionary;
+use crate::game::SolverState;
+use crate::solver::{Move, MoveKind};
+use crate::tile::{Tile, RACK_SIZE};
+
+use super::opponent::OpponentModel;
+use super::playout::{win_value, Player, Playout, PlayoutOutcome, PlayoutRecord};
+use super::pool::{iteration_seed, position_fingerprint, TilePool, PLAYOUT_SEED};
 
 /// Configuration for Monte Carlo evaluation
 #[derive(Debug, Clone)]

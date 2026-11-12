@@ -2,7 +2,14 @@
 //! spread variance, the bingo model, the loss calibration, the win
 //! model). All are ignored tests; each says how to run it.
 
+use super::playout::{normal_cdf, rack_from, Player, Playout, TEMPO};
 use super::*;
+use crate::game::full_tile_set;
+use crate::solver::{MoveKind, Solver};
+use crate::tile::{Tile, RACK_SIZE};
+use fastrand::Rng;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use std::time::Instant;
 
 /// Solve the normal equations `a x = b` (small dense system) by Gaussian
 /// elimination with partial pivoting.

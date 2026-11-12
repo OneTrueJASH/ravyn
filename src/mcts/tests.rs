@@ -1,4 +1,12 @@
+use super::eval::paired_difference;
+use super::playout::{normal_cdf, remaining_spread_sd, Player, Playout};
 use super::*;
+use crate::board::Board;
+use crate::game::SolverState;
+use crate::solver::{Move, MoveKind, Solver};
+use crate::tile::{Tile, RACK_SIZE};
+use fastrand::Rng;
+use std::time::{Duration, Instant};
 
 #[test]
 fn test_tile_pool_creation() {

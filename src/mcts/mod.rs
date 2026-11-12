@@ -37,28 +37,8 @@ mod tests;
 pub(crate) use eval::CandidateSim;
 pub use eval::{MctsConfig, MctsEvaluator, MctsResult};
 pub use opponent::OpponentModel;
-pub(crate) use playout::{win_value, PlayoutOutcome, PlayoutRecord};
+pub(crate) use playout::{win_value, PlayoutRecord};
 pub use playout::{SimChoice, TracePoint};
 pub(crate) use pool::Fnv;
 pub use pool::{position_fingerprint, TilePool};
 pub use selfplay::{self_play_match, MatchEngine, MatchResult};
-
-#[allow(unused_imports)]
-use self::{eval::*, opponent::*, playout::*, pool::*, selfplay::*};
-
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use fastrand::Rng;
-use rayon::prelude::*;
-
-use crate::board::Board;
-use crate::dictionary::Dictionary;
-use crate::game::full_tile_set;
-use crate::game::SolverState;
-use crate::game::{best_exchange, top_exchanges};
-use crate::solver::{Move, MoveKind, Solver, EXCHANGE_MIN_BAG};
-#[cfg(test)]
-use crate::tile::Rack;
-use crate::tile::{Tile, RACK_SIZE};
