@@ -262,16 +262,10 @@ impl SolverState {
     }
 
     /// Place a tile on the board (for recreating game state)
-    pub fn place_tile(&mut self, row: usize, col: usize, letter: char, is_blank: bool) {
+    pub fn place_tile(&mut self, row: usize, col: usize, tile: Tile) {
         if row >= BOARD_SIZE || col >= BOARD_SIZE {
             return;
         }
-
-        let tile = if is_blank {
-            Tile::blank(letter)
-        } else {
-            Tile::new(letter)
-        };
 
         self.board.place_tile(row, col, tile);
     }
@@ -452,7 +446,14 @@ impl SolverState {
                 if col >= BOARD_SIZE {
                     return Err(format!("row {} is too long", row + 1));
                 }
-                state.place_tile(row, col, ch.to_ascii_uppercase(), ch.is_ascii_lowercase());
+                // CGP writes a blank as the lowercase letter it stands for.
+                let letter = ch.to_ascii_uppercase();
+                let tile = if ch.is_ascii_lowercase() {
+                    Tile::blank(letter)
+                } else {
+                    Tile::new(letter)
+                };
+                state.place_tile(row, col, tile);
                 col += 1;
             }
             col += run;
@@ -574,7 +575,7 @@ mod tests {
     #[test]
     fn test_place_and_get_tile() {
         let mut state = SolverState::new();
-        state.place_tile(7, 7, 'A', false);
+        state.place_tile(7, 7, Tile::new('A'));
         let tile = state.get_tile(7, 7).expect("tile should be present");
         assert_eq!(tile.letter, 'A');
         assert!(!tile.is_blank);
@@ -583,7 +584,7 @@ mod tests {
     #[test]
     fn test_place_blank_tile() {
         let mut state = SolverState::new();
-        state.place_tile(3, 4, 'S', true);
+        state.place_tile(3, 4, Tile::blank('S'));
         let tile = state.get_tile(3, 4).expect("tile should be present");
         assert!(tile.is_blank);
         assert_eq!(tile.letter, 'S');
@@ -592,7 +593,7 @@ mod tests {
     #[test]
     fn test_remove_tile() {
         let mut state = SolverState::new();
-        state.place_tile(0, 0, 'Z', false);
+        state.place_tile(0, 0, Tile::new('Z'));
         assert!(state.get_tile(0, 0).is_some());
         let removed = state.remove_tile(0, 0);
         assert!(removed.is_some());
@@ -659,9 +660,9 @@ mod tests {
     #[test]
     fn test_unseen_tiles_with_board_and_rack() {
         let mut state = SolverState::new();
-        state.place_tile(7, 7, 'C', false);
-        state.place_tile(7, 8, 'A', false);
-        state.place_tile(7, 9, 'T', false);
+        state.place_tile(7, 7, Tile::new('C'));
+        state.place_tile(7, 8, Tile::new('A'));
+        state.place_tile(7, 9, Tile::new('T'));
         state.add_to_rack('D');
         state.add_to_rack('O');
 
@@ -690,7 +691,7 @@ mod tests {
                 let row = placed / 15;
                 let col = placed % 15;
                 if row < 15 {
-                    state.place_tile(row, col, letter, false);
+                    state.place_tile(row, col, Tile::new(letter));
                     placed += 1;
                 }
             }
@@ -757,9 +758,9 @@ mod tests {
         };
 
         let mut state = SolverState::new();
-        state.place_tile(7, 6, 'C', false);
-        state.place_tile(7, 7, 'A', false);
-        state.place_tile(7, 8, 'T', false);
+        state.place_tile(7, 6, Tile::new('C'));
+        state.place_tile(7, 7, Tile::new('A'));
+        state.place_tile(7, 8, Tile::new('T'));
 
         state.add_to_rack('S');
         state.add_to_rack('E');

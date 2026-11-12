@@ -9,7 +9,7 @@ use std::time::Duration;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use cpsolver2::dictionary::{load_dictionary_from, Dictionary};
-use cpsolver2::endgame::EndgameSolver;
+use cpsolver2::endgame::{EndgameSolver, FinalTurn};
 use cpsolver2::game::SolverState;
 use cpsolver2::mcts::{MctsConfig, MctsEvaluator};
 use cpsolver2::solver::{MoveKind, Solver};
@@ -108,7 +108,7 @@ fn endgame(c: &mut Criterion) {
     group.sample_size(10);
     group.bench_function("solve_end_RCVSDW", |b| {
         b.iter(|| {
-            let r = solver.solve(&s.board, &our, &opp, true);
+            let r = solver.solve(&s.board, &our, &opp, FinalTurn::Opponent);
             assert!(r.iter().any(|m| m.mv.kind == MoveKind::Pass));
             r
         })

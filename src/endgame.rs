@@ -12,14 +12,14 @@
 //! **No go-out bonus:** Emptying your rack gives no bonus points.
 //!
 //! So once the bag is empty there are only two situations, and the caller
-//! (which knows who emptied the bag) picks one:
+//! (which knows who emptied the bag) picks one as a [`FinalTurn`]:
 //!
-//! - `opponent_has_turn = true`: the opponent emptied the bag. We play our
+//! - [`FinalTurn::Opponent`]: the opponent emptied the bag. We play our
 //!   last turn and they play the final move. This is an exact 2-ply search:
 //!   for each of our moves (and for passing), apply it and find the
 //!   opponent's highest-scoring reply; rank by `our_score - their_best`.
 //!   The opponent's rack is fully known (it is every unseen tile).
-//! - `opponent_has_turn = false`: we emptied the bag and the opponent has
+//! - [`FinalTurn::Us`]: we emptied the bag and the opponent has
 //!   already taken their last turn. Our move ends the game: rank by score.
 //!
 //! Deeper search is deliberately absent — there are no further turns to
@@ -34,6 +34,40 @@ use crate::dictionary::Dictionary;
 use crate::logging::log;
 use crate::solver::{Move, Solver};
 use crate::tile::{Rack, Tile};
+
+/// Who plays the very last move of the game.
+///
+/// Crossplay's equal-turn rule: when a player draws the last tile from the
+/// bag, the other player gets one more turn and then the player who emptied
+/// the bag plays the final move. So when the bag is empty on our turn, the
+/// opponent only gets to reply if *they* emptied the bag. The app infers
+/// this from moves applied through the suggestions list and the user can
+/// override it with Ctrl+E.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FinalTurn {
+    /// The opponent emptied the bag: we play our last turn, they reply.
+    #[default]
+    Opponent,
+    /// We emptied the bag: the opponent has already played their last
+    /// turn, so our next move ends the game.
+    Us,
+}
+
+impl FinalTurn {
+    pub fn toggle(self) -> Self {
+        match self {
+            FinalTurn::Opponent => FinalTurn::Us,
+            FinalTurn::Us => FinalTurn::Opponent,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FinalTurn::Opponent => "OPP",
+            FinalTurn::Us => "YOU",
+        }
+    }
+}
 
 /// A move in the principal variation (the optimal 2-move sequence)
 #[derive(Debug, Clone)]
@@ -72,7 +106,7 @@ impl<'a> EndgameSolver<'a> {
     /// Evaluate every move available to us with the bag empty.
     ///
     /// `opponent_rack` must be the opponent's complete rack (all unseen
-    /// tiles). With `opponent_has_turn` the result includes a pass candidate,
+    /// tiles). With [`FinalTurn::Opponent`] the result includes a pass candidate,
     /// since every play may open more for the opponent than it scores.
     /// Results are sorted best first: by endgame value, then raw score.
     pub fn solve(
@@ -80,9 +114,9 @@ impl<'a> EndgameSolver<'a> {
         board: &Board,
         our_rack: &[Tile],
         opponent_rack: &[Tile],
-        opponent_has_turn: bool,
+        final_turn: FinalTurn,
     ) -> Vec<EndgameMove> {
-        self.solve_cancellable(board, our_rack, opponent_rack, opponent_has_turn, None)
+        self.solve_cancellable(board, our_rack, opponent_rack, final_turn, None)
             .unwrap_or_default()
     }
 
@@ -93,9 +127,10 @@ impl<'a> EndgameSolver<'a> {
         board: &Board,
         our_rack: &[Tile],
         opponent_rack: &[Tile],
-        opponent_has_turn: bool,
+        final_turn: FinalTurn,
         cancel: Option<&AtomicBool>,
     ) -> Option<Vec<EndgameMove>> {
+        let opponent_has_turn = final_turn == FinalTurn::Opponent;
         let cancelled = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
         let solver = Solver::new(board, self.dictionary);
         let mut rack = Rack::new();
@@ -105,11 +140,11 @@ impl<'a> EndgameSolver<'a> {
         let mut our_moves = solver.find_moves(&rack);
 
         log(&format!(
-            "Endgame solver: {} candidate moves, {} our tiles, {} opp tiles, opponent_has_turn={}",
+            "Endgame solver: {} candidate moves, {} our tiles, {} opp tiles, final turn: {:?}",
             our_moves.len(),
             our_rack.len(),
             opponent_rack.len(),
-            opponent_has_turn
+            final_turn
         ));
 
         let mut results: Vec<EndgameMove> = if !opponent_has_turn {
@@ -237,7 +272,7 @@ mod tests {
         let opp_rack = vec![]; // No opponent tiles
 
         let solver = EndgameSolver::new(&dict);
-        let results = solver.solve(&board, &our_rack, &opp_rack, false);
+        let results = solver.solve(&board, &our_rack, &opp_rack, FinalTurn::Us);
 
         assert!(!results.is_empty());
 
@@ -274,7 +309,7 @@ mod tests {
         let opp_rack = vec![Tile::new('E')];
 
         let solver = EndgameSolver::new(&dict);
-        let results = solver.solve(&board, &our_rack, &opp_rack, true);
+        let results = solver.solve(&board, &our_rack, &opp_rack, FinalTurn::Opponent);
 
         assert!(!results.is_empty());
 
@@ -320,7 +355,7 @@ mod tests {
         let opp_rack = vec![Tile::new('X')];
 
         let solver = EndgameSolver::new(&dict);
-        let results = solver.solve(&board, &our_rack, &opp_rack, true);
+        let results = solver.solve(&board, &our_rack, &opp_rack, FinalTurn::Opponent);
 
         assert!(!results.is_empty());
 
@@ -366,7 +401,7 @@ mod tests {
         let opp_rack = vec![Tile::new('Z'), Tile::new('A'), Tile::new('S')];
 
         let solver = EndgameSolver::new(&dict);
-        let results = solver.solve(&board, &our_rack, &opp_rack, true);
+        let results = solver.solve(&board, &our_rack, &opp_rack, FinalTurn::Opponent);
 
         let mut opp = Rack::new();
         for t in &opp_rack {
@@ -411,7 +446,7 @@ mod tests {
         }
 
         // Without an opponent turn there is no pass candidate.
-        let last = solver.solve(&board, &our_rack, &opp_rack, false);
+        let last = solver.solve(&board, &our_rack, &opp_rack, FinalTurn::Us);
         assert!(last.iter().all(|r| r.mv.word != PASS_WORD));
     }
 }

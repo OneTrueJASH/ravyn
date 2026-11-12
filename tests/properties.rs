@@ -38,12 +38,12 @@ fn position() -> impl Strategy<Value = SolverState> {
                     continue;
                 }
                 let t = bag.pop().expect("100 tiles");
-                let letter = if t.is_blank {
-                    (b'A' + rng.u8(0..26)) as char
+                let tile = if t.is_blank {
+                    Tile::blank((b'A' + rng.u8(0..26)) as char)
                 } else {
-                    t.letter
+                    t
                 };
-                state.place_tile(r, c, letter, t.is_blank);
+                state.place_tile(r, c, tile);
                 placed += 1;
             }
             for _ in 0..in_rack {
@@ -134,7 +134,8 @@ proptest! {
         let (r, c) = (sq / BOARD_SIZE, sq % BOARD_SIZE);
         prop_assume!(state.get_tile(r, c).is_none());
         let mut s = state.clone();
-        s.place_tile(r, c, (b'A' + letter) as char, blank);
+        let letter = (b'A' + letter) as char;
+        s.place_tile(r, c, if blank { Tile::blank(letter) } else { Tile::new(letter) });
         let t = s.get_tile(r, c).copied().expect("placed");
         prop_assert_eq!(t.is_blank, blank);
         s.remove_tile(r, c);

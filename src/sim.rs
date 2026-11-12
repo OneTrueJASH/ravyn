@@ -557,11 +557,11 @@ impl<'a> Simulation<'a> {
             self.update_status();
 
             if last_publish.elapsed() >= PUBLISH_EVERY {
-                publish(self.snapshot(started.elapsed(), false));
+                publish(self.snapshot(started.elapsed(), /* done= */ false));
                 last_publish = Instant::now();
             }
         }
-        self.snapshot(started.elapsed(), true)
+        self.snapshot(started.elapsed(), /* done= */ true)
     }
 
     /// Summaries of every arm, for the table.

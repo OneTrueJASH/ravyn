@@ -7,7 +7,7 @@
 use cpsolver2::board::Board;
 use cpsolver2::datafiles::{file_status, FileStatus, WORDS_FST};
 use cpsolver2::dictionary::{load_dictionary_from, Dictionary};
-use cpsolver2::endgame::EndgameSolver;
+use cpsolver2::endgame::{EndgameSolver, FinalTurn};
 use cpsolver2::game::SolverState;
 use cpsolver2::solver::MoveKind;
 use cpsolver2::tile::Tile;
@@ -39,9 +39,9 @@ fn test_full_solve_flow() {
 
     // Set up a board with "CAT" placed horizontally at row 7.
     let mut state = SolverState::new();
-    state.place_tile(7, 6, 'C', false);
-    state.place_tile(7, 7, 'A', false);
-    state.place_tile(7, 8, 'T', false);
+    state.place_tile(7, 6, Tile::new('C'));
+    state.place_tile(7, 7, Tile::new('A'));
+    state.place_tile(7, 8, Tile::new('T'));
 
     // Give ourselves a rack of tiles.
     for ch in ['S', 'E', 'R', 'I', 'N', 'G', 'D'] {
@@ -121,7 +121,7 @@ fn test_endgame_solve_flow() {
     let opp_rack = vec![Tile::new('R'), Tile::new('D')];
 
     let solver = EndgameSolver::new(&dictionary);
-    let results = solver.solve(&board, &our_rack, &opp_rack, true);
+    let results = solver.solve(&board, &our_rack, &opp_rack, FinalTurn::Opponent);
 
     assert!(
         !results.is_empty(),
@@ -166,9 +166,9 @@ fn test_move_apply_and_resolve() {
 
     // Place "CAT" on the board, give ourselves an "S" to extend to "CATS".
     let mut state = SolverState::new();
-    state.place_tile(7, 7, 'C', false);
-    state.place_tile(7, 8, 'A', false);
-    state.place_tile(7, 9, 'T', false);
+    state.place_tile(7, 7, Tile::new('C'));
+    state.place_tile(7, 8, Tile::new('A'));
+    state.place_tile(7, 9, Tile::new('T'));
 
     state.add_to_rack('S');
     state.add_to_rack('E');
@@ -228,9 +228,9 @@ fn test_unseen_tile_tracking() {
     assert_eq!(total_tiles, 100, "Fresh board should have 100 unseen tiles");
 
     // Place 3 tiles on the board.
-    state.place_tile(7, 7, 'C', false);
-    state.place_tile(7, 8, 'A', false);
-    state.place_tile(7, 9, 'T', false);
+    state.place_tile(7, 7, Tile::new('C'));
+    state.place_tile(7, 8, Tile::new('A'));
+    state.place_tile(7, 9, Tile::new('T'));
 
     // Add 2 tiles to the rack.
     state.add_to_rack('S');
@@ -344,7 +344,7 @@ fn test_endgame_detection() {
         let row = placed / 15;
         let col = placed % 15;
         if row < 15 {
-            state.place_tile(row, col, *ch, false);
+            state.place_tile(row, col, Tile::new(*ch));
             placed += 1;
         }
 
@@ -384,8 +384,8 @@ fn test_blank_tile_move_generation() {
 
     // Place "AT" on the board to give the solver something to hook onto.
     let mut state = SolverState::new();
-    state.place_tile(7, 7, 'A', false);
-    state.place_tile(7, 8, 'T', false);
+    state.place_tile(7, 7, Tile::new('A'));
+    state.place_tile(7, 8, Tile::new('T'));
 
     // Give ourselves a blank plus some regular tiles.
     state.add_to_rack('?'); // blank
