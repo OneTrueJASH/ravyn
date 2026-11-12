@@ -187,7 +187,7 @@ impl<'a> Playout<'a> {
         Some(pass)
     }
 
-    pub(super) fn rack(&self, p: Player) -> &Vec<Tile> {
+    pub(super) fn rack(&self, p: Player) -> &[Tile] {
         &self.racks[p as usize]
     }
 

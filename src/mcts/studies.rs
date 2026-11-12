@@ -576,7 +576,7 @@ fn study_bingo_probability() {
             let mut g = Playout::new_game(&dict, 2000 + seed);
             g.run_with(Player::Us, 1000, &mut |p, to_move| {
                 for _ in 0..3 {
-                    let mut pool: Vec<Tile> = p.rack(to_move).clone();
+                    let mut pool: Vec<Tile> = p.rack(to_move).to_vec();
                     pool.extend_from_slice(&p.bag);
                     if pool.len() < RACK_SIZE {
                         return;

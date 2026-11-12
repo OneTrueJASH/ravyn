@@ -399,7 +399,11 @@ impl<'d> LeaveTable<'d> {
             out[idx] = (index / stride) as u8;
             index %= stride;
         }
-        debug_assert!(out.iter().zip(&self.counts).all(|(o, c)| o <= c));
+        debug_assert!(
+            out.iter().zip(&self.counts).all(|(o, c)| o <= c),
+            "unranked {out:?} exceeds the available counts {:?}",
+            self.counts
+        );
         out
     }
 
