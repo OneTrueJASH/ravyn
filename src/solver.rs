@@ -712,9 +712,9 @@ impl<'a> Solver<'a> {
             &[Direction::Horizontal, Direction::Vertical]
         };
 
-        for row in 0..BOARD_SIZE {
-            for col in 0..BOARD_SIZE {
-                if !info.anchor[row][col] {
+        for (row, anchors) in info.anchor.iter().enumerate() {
+            for (col, &is_anchor) in anchors.iter().enumerate() {
+                if !is_anchor {
                     continue;
                 }
                 for &dir in directions {
