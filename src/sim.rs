@@ -26,7 +26,9 @@
 //! a later run on the same position continues from them, because playout
 //! `i` is the same deal in every run (see `CandidateSim::run_batch`).
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -52,6 +54,20 @@ pub const WIN_EPSILON: f64 = 0.005;
 const BATCH: usize = 8;
 /// Arms admitted at a time while widening.
 const WIDEN_BATCH: usize = 256;
+/// Jobs kept in flight per pool thread, so a thread that finishes always
+/// finds another queued.
+const JOBS_PER_THREAD: usize = 4;
+/// How often the racing bounds are refreshed while results stream in.
+const STATUS_EVERY: Duration = Duration::from_millis(2);
+
+/// One finished job: the playouts of `arm` from iteration `start`
+/// (`records` is shorter than `n` if it was stopped early).
+struct JobResult {
+    arm: usize,
+    start: usize,
+    n: usize,
+    records: Vec<PlayoutRecord>,
+}
 /// How often a running simulation publishes a snapshot.
 pub const PUBLISH_EVERY: Duration = Duration::from_millis(300);
 
@@ -259,7 +275,10 @@ pub struct Simulation<'a> {
     order: Vec<usize>,
     /// How many arms of `order` are admitted.
     admitted: usize,
-    sims: Vec<Option<CandidateSim<'a>>>,
+    sims: Vec<Option<Arc<CandidateSim<'a>>>>,
+    /// Playouts scheduled for each arm whose results have not been
+    /// applied yet.
+    in_flight: Vec<usize>,
     stats: Vec<ArmStats>,
     status: Vec<ArmStatus>,
     playouts: u64,
@@ -316,6 +335,7 @@ impl<'a> Simulation<'a> {
             order,
             admitted: 0,
             sims: (0..n).map(|_| None).collect(),
+            in_flight: vec![0; n],
             stats,
             status: vec![ArmStatus::Pending; n],
             playouts,
@@ -346,7 +366,7 @@ impl<'a> Simulation<'a> {
             .map(|&a| (a, CandidateSim::new(state, &candidates[a], diff, model)))
             .collect();
         for (a, sim) in built {
-            self.sims[a] = Some(sim);
+            self.sims[a] = Some(Arc::new(sim));
         }
         self.admitted = upto;
     }
@@ -355,11 +375,11 @@ impl<'a> Simulation<'a> {
         self.settings.min_playouts
     }
 
-    /// Pick the next round of jobs: (arm, first iteration, count).
+    /// Pick up to `capacity` more jobs: (arm, first iteration, count).
+    /// Their playouts count as in flight until their results are applied.
     fn next_jobs(&mut self, capacity: usize) -> Vec<(usize, usize, usize)> {
         let floor = self.floor();
         let mut jobs = Vec::new();
-        let mut scheduled = vec![0usize; self.stats.len()];
 
         let racing: Vec<usize> = (0..self.stats.len())
             .filter(|&a| self.status[a] == ArmStatus::Racing)
@@ -389,11 +409,11 @@ impl<'a> Simulation<'a> {
                 self.admit(self.admitted + WIDEN_BATCH);
             }
             let a = self.order[pos];
-            let have = self.stats[a].n() + scheduled[a];
+            let have = self.stats[a].n() + self.in_flight[a];
             if have < floor {
                 let n = BATCH.min(floor - have);
                 jobs.push((a, have, n));
-                scheduled[a] += n;
+                self.in_flight[a] += n;
             } else {
                 pos += 1;
             }
@@ -409,13 +429,13 @@ impl<'a> Simulation<'a> {
                 if jobs.len() >= capacity {
                     break 'fill;
                 }
-                let have = self.stats[a].n() + scheduled[a];
+                let have = self.stats[a].n() + self.in_flight[a];
                 if have >= cap {
                     continue;
                 }
                 let n = BATCH.min(cap - have);
                 jobs.push((a, have, n));
-                scheduled[a] += n;
+                self.in_flight[a] += n;
                 added = true;
             }
             if !added {
@@ -507,6 +527,15 @@ impl<'a> Simulation<'a> {
     /// Run until cancelled, out of budget, or settled, calling `publish`
     /// with a snapshot about every [`PUBLISH_EVERY`]. Returns the final
     /// snapshot (with `done` set).
+    ///
+    /// Jobs run on the rayon pool as a continuous pipeline: about
+    /// [`JOBS_PER_THREAD`] per thread are kept in flight, and each result
+    /// is applied as it arrives and replaced by a new job, so no thread
+    /// waits for the slowest job of a round. Results are applied in
+    /// iteration order per arm (a job that finishes early waits for the
+    /// ones before it), so every arm's playouts stay contiguous from
+    /// iteration 0 and each playout is the same deal as in any other run.
+    /// Which arms get extra playouts can vary slightly with thread timing.
     pub fn run(
         &mut self,
         cancel: &AtomicBool,
@@ -514,54 +543,149 @@ impl<'a> Simulation<'a> {
     ) -> SimSnapshot {
         let started = Instant::now();
         let deadline = self.settings.budget.map(|b| started + b);
-        let capacity = (rayon::current_num_threads() * 4).max(8);
+        let capacity = (rayon::current_num_threads() * JOBS_PER_THREAD).max(8);
+        let (dict, max_plies) = (self.dict, self.settings.max_plies);
         let mut last_publish = Instant::now();
+        let mut last_status = Instant::now();
 
-        loop {
-            if cancel.load(Ordering::Relaxed) || deadline.is_some_and(|d| Instant::now() >= d) {
-                break;
-            }
-            if self.settled() {
-                break;
-            }
-            let jobs = self.next_jobs(capacity);
-            if jobs.is_empty() {
-                break;
-            }
-            let (dict, max_plies) = (self.dict, self.settings.max_plies);
-            let sims = &self.sims;
-            let mut batches: Vec<(usize, usize, usize, Vec<PlayoutRecord>)> = jobs
-                .par_iter()
-                .map(|&(a, start, n)| {
-                    let sim = sims[a].as_ref().expect("scheduled arms are admitted");
-                    let records = sim.run_batch(dict, start, n, max_plies, deadline, Some(cancel));
-                    (a, start, n, records)
-                })
-                .collect();
-            batches.sort_by_key(|&(a, start, _, _)| (a, start));
-            let mut cut = vec![false; self.stats.len()];
-            for (a, start, n, records) in &batches {
-                // Keep every arm's playouts contiguous from iteration 0.
-                if cut[*a] || *start != self.stats[*a].n() {
-                    cut[*a] = true;
-                    continue;
-                }
-                for r in records {
-                    self.stats[*a].push(self.settings.score_diff, r);
-                }
-                self.playouts += records.len() as u64;
-                if records.len() < *n {
-                    cut[*a] = true;
-                }
-            }
-            self.update_status();
+        let (tx, rx) = mpsc::channel::<std::thread::Result<JobResult>>();
+        // The first job that panicked; re-raised once the others finish.
+        let mut panicked: Option<Box<dyn std::any::Any + Send>> = None;
+        // Results that arrived before an earlier job of the same arm.
+        let mut waiting: Vec<JobResult> = Vec::new();
+        // Arms whose playouts stopped short (cancel or deadline): later
+        // results for them would leave a gap, so they are dropped.
+        let mut cut = vec![false; self.stats.len()];
+        let mut outstanding = 0usize;
 
-            if last_publish.elapsed() >= PUBLISH_EVERY {
-                publish(self.snapshot(started.elapsed(), /* done= */ false));
-                last_publish = Instant::now();
+        rayon::in_place_scope(|scope| {
+            let mut stopping = false;
+            loop {
+                if !stopping
+                    && (cancel.load(Ordering::Relaxed)
+                        || deadline.is_some_and(|d| Instant::now() >= d)
+                        || self.settled())
+                {
+                    stopping = true;
+                }
+                if !stopping && outstanding < capacity {
+                    let mut jobs = self.next_jobs(capacity - outstanding);
+                    if jobs.is_empty() && outstanding == 0 {
+                        // Nothing to do on the bounds as last refreshed;
+                        // fresh ones may start a race before giving up.
+                        self.update_status();
+                        last_status = Instant::now();
+                        jobs = self.next_jobs(capacity);
+                        stopping = jobs.is_empty();
+                    }
+                    for (a, start, n) in jobs {
+                        let sim =
+                            Arc::clone(self.sims[a].as_ref().expect("scheduled arms are admitted"));
+                        let tx = tx.clone();
+                        outstanding += 1;
+                        scope.spawn(move |_| {
+                            // A panic is reported like a result, or the
+                            // coordinator would wait for it forever.
+                            let records = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                sim.run_batch(dict, start, n, max_plies, deadline, Some(cancel))
+                            }));
+                            // The receiver outlives every job in the scope.
+                            let _ = tx.send(match records {
+                                Ok(records) => Ok(JobResult {
+                                    arm: a,
+                                    start,
+                                    n,
+                                    records,
+                                }),
+                                Err(payload) => Err(payload),
+                            });
+                        });
+                    }
+                }
+                if outstanding == 0 {
+                    break;
+                }
+
+                // Wait for one result, then take whatever else is ready.
+                let first = rx.recv().expect("jobs hold a sender until they finish");
+                for r in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
+                    outstanding -= 1;
+                    match r {
+                        Ok(r) => self.accept(r, &mut waiting, &mut cut),
+                        Err(payload) => {
+                            stopping = true;
+                            panicked.get_or_insert(payload);
+                        }
+                    }
+                }
+
+                // Racing bounds cost a pass over every arm: refresh them
+                // every few milliseconds rather than after every job.
+                if last_status.elapsed() >= STATUS_EVERY || stopping {
+                    self.update_status();
+                    last_status = Instant::now();
+                }
+                if !stopping && last_publish.elapsed() >= PUBLISH_EVERY {
+                    publish(self.snapshot(started.elapsed(), /* done= */ false));
+                    last_publish = Instant::now();
+                }
+            }
+        });
+        if let Some(payload) = panicked {
+            std::panic::resume_unwind(payload);
+        }
+        // Anything still waiting follows a short batch: its arm is cut.
+        for r in waiting {
+            self.in_flight[r.arm] -= r.n;
+        }
+        debug_assert!(
+            self.in_flight.iter().all(|&n| n == 0),
+            "every scheduled playout is applied or dropped"
+        );
+        self.update_status();
+        self.snapshot(started.elapsed(), /* done= */ true)
+    }
+
+    /// Take one job's result: apply it if it is next in its arm's
+    /// iteration order (then any waiting results it unblocks), hold it if
+    /// an earlier job of the arm is still running, drop it if the arm was
+    /// cut short.
+    fn accept(&mut self, result: JobResult, waiting: &mut Vec<JobResult>, cut: &mut [bool]) {
+        let mut next = Some(result);
+        while let Some(r) = next.take() {
+            let a = r.arm;
+            if cut[a] {
+                self.in_flight[a] -= r.n;
+            } else if r.start == self.stats[a].n() {
+                self.in_flight[a] -= r.n;
+                for rec in &r.records {
+                    self.stats[a].push(self.settings.score_diff, rec);
+                }
+                self.playouts += r.records.len() as u64;
+                if r.records.len() < r.n {
+                    cut[a] = true;
+                }
+                // The arm's following job may already be waiting.
+                if let Some(i) = waiting
+                    .iter()
+                    .position(|w| w.arm == a && w.start == self.stats[a].n())
+                {
+                    next = Some(waiting.swap_remove(i));
+                } else if cut[a] {
+                    // Drop everything the cut arm still has waiting.
+                    waiting.retain(|w| {
+                        if w.arm == a {
+                            self.in_flight[a] -= w.n;
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+            } else {
+                waiting.push(r);
             }
         }
-        self.snapshot(started.elapsed(), /* done= */ true)
     }
 
     /// Summaries of every arm, for the table.
