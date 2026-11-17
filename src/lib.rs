@@ -18,6 +18,7 @@ pub mod board;
 pub mod dictionary;
 pub mod endgame;
 pub mod game;
+pub mod inference;
 pub mod leaves;
 pub mod mcts;
 pub mod rules;

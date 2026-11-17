@@ -278,6 +278,8 @@ pub struct Solver<'a> {
     dictionary: &'a Dictionary,
     /// The board's rules, kept at hand for the search.
     rules: &'static Rules,
+    /// The board analysis, when computed up front ([`Self::prepared`]).
+    info: Option<Box<BoardInfo>>,
 }
 
 /// Board-derived tables that depend only on the position, not the rack.
@@ -486,6 +488,9 @@ enum Sink {
     BestEquity(Option<Snapshot>),
     /// The `k` plays with the highest equity, best first.
     TopEquity { k: usize, kept: Vec<Snapshot> },
+    /// Whether any play's equity exceeds `threshold`; the search stops at
+    /// the first that does.
+    Beats { threshold: f32, found: bool },
 }
 
 /// Mutable search state for one `find_moves` call.
@@ -513,6 +518,8 @@ struct Gen<'s, 'a> {
     leaves: LeaveTable<'a>,
     leave_index: usize,
     sink: Sink,
+    /// Set when the sink has its answer; the search unwinds.
+    abort: bool,
 }
 
 impl<'a> Solver<'a> {
@@ -521,6 +528,7 @@ impl<'a> Solver<'a> {
             board,
             dictionary,
             rules: board.rules(),
+            info: None,
         }
     }
 
@@ -577,6 +585,28 @@ impl<'a> Solver<'a> {
             unreachable!("the sink comes back as it went in");
         };
         best.map(|snap| self.materialize(tiles, &snap))
+    }
+
+    /// Analyze the board now (anchors and cross-checks) instead of on
+    /// every search. Worth it when one board is searched with many racks,
+    /// as rack inference does.
+    pub fn prepared(mut self) -> Self {
+        self.info = Some(Box::new(self.analyze_board()));
+        self
+    }
+
+    /// True if some play from `tiles` has equity above `threshold`. Stops
+    /// at the first such play, so a rack with a strong play is ruled out
+    /// quickly.
+    pub fn any_play_beats(&self, tiles: &[Tile], threshold: f32) -> bool {
+        let sink = Sink::Beats {
+            threshold,
+            found: false,
+        };
+        let Sink::Beats { found, .. } = self.generate(tiles, sink) else {
+            unreachable!("the sink comes back as it went in");
+        };
+        found
     }
 
     /// The `k` plays with the highest equity, best first, in the order
@@ -664,15 +694,22 @@ impl<'a> Solver<'a> {
             return sink;
         }
 
-        let info = self.analyze_board();
-        let unseen = self.unseen_for(&info, tiles.len());
+        let analyzed;
+        let info: &BoardInfo = match &self.info {
+            Some(info) => info,
+            None => {
+                analyzed = self.analyze_board();
+                &analyzed
+            }
+        };
+        let unseen = self.unseen_for(info, tiles.len());
         let counts = rack_counts(tiles);
         let leaves = LeaveTable::new(counts, self.dictionary, Some(unseen));
         let leave_index = leaves.full_index();
 
         let mut gen = Gen {
             solver: self,
-            info: &info,
+            info,
             dir: Direction::Horizontal,
             di: 0,
             lane: 0,
@@ -691,6 +728,7 @@ impl<'a> Solver<'a> {
             leaves,
             leave_index,
             sink,
+            abort: false,
         };
 
         // On the first turn the board is symmetric, so every vertical play
@@ -707,6 +745,9 @@ impl<'a> Solver<'a> {
                     continue;
                 }
                 for &dir in directions {
+                    if gen.abort {
+                        return gen.sink;
+                    }
                     gen.dir = dir;
                     gen.di = dir_index(dir);
                     let (lane, pos) = match dir {
@@ -1084,6 +1125,9 @@ impl<'s, 'a> Gen<'s, 'a> {
     /// each one — including the empty left part — extend rightwards from
     /// the anchor.
     fn left_part(&mut self, node: DawgNode, limit: usize) {
+        if self.abort {
+            return;
+        }
         self.attach_left_part_and_extend(node);
 
         if limit == 0 {
@@ -1158,6 +1202,9 @@ impl<'s, 'a> Gen<'s, 'a> {
         word_mult: u32,
         cross_total: u32,
     ) {
+        if self.abort {
+            return;
+        }
         let dict = self.solver.dictionary;
 
         if pos == BOARD_SIZE {
@@ -1299,7 +1346,7 @@ impl<'s, 'a> Gen<'s, 'a> {
                 }
                 return;
             }
-            Sink::All(_) | Sink::BestEquity(_) | Sink::TopEquity { .. } => {}
+            Sink::All(_) | Sink::BestEquity(_) | Sink::TopEquity { .. } | Sink::Beats { .. } => {}
         }
 
         snap.equity = score as f32 + self.leaves.value(self.leave_index);
@@ -1335,6 +1382,12 @@ impl<'s, 'a> Gen<'s, 'a> {
                     .unwrap_or(kept.len());
                 kept.insert(at, snap);
                 kept.truncate(k);
+            }
+            Sink::Beats { threshold, found } => {
+                if snap.equity > *threshold {
+                    *found = true;
+                    self.abort = true;
+                }
             }
             Sink::BestScore(_) => unreachable!("handled above"),
         }
