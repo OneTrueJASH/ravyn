@@ -119,6 +119,38 @@ impl<'a> EndgameSolver<'a> {
             .unwrap_or_default()
     }
 
+    /// What the side to move can get when the other side plays the last
+    /// move of the game: the most of (its play's score minus the other
+    /// side's best final score), over every play and passing. The value of
+    /// [`Self::solve`]'s best move with [`FinalTurn::Opponent`], without
+    /// ranking every move.
+    ///
+    /// Plays are tried from the highest score down. A final reply scores
+    /// at least 0, so a play can be worth no more than its own score, and
+    /// the search stops at the first play that cannot beat the best value
+    /// so far.
+    pub fn best_value(&self, board: &Board, mover: &[Tile], last: &[Tile]) -> i32 {
+        let final_score = |b: &Board| Solver::new(b, self.dictionary).best_score(last) as i32;
+        // Passing: the other side then takes its best final play here.
+        let mut best = -final_score(board);
+        let mut moves = Solver::new(board, self.dictionary).find_moves_for(mover);
+        moves.sort_by_key(|m| std::cmp::Reverse(m.score));
+        let mut after = board.clone();
+        for mv in &moves {
+            if mv.score as i32 <= best {
+                break;
+            }
+            for (r, c, t) in &mv.tiles_used {
+                after.place_tile(*r, *c, *t);
+            }
+            best = best.max(mv.score as i32 - final_score(&after));
+            for (r, c, _) in &mv.tiles_used {
+                after.remove_tile(*r, *c);
+            }
+        }
+        best
+    }
+
     /// As [`Self::solve`], checking `cancel` before each of our moves is
     /// searched. Returns `None` if the search was cancelled.
     pub fn solve_cancellable(
@@ -444,5 +476,37 @@ mod tests {
         // Without an opponent turn there is no pass candidate.
         let last = solver.solve(&board, &our_rack, &opp_rack, FinalTurn::Us);
         assert!(last.iter().all(|r| r.mv.word != PASS_WORD));
+    }
+
+    /// `best_value` is the value of the best move `solve` ranks, on the
+    /// endgame test position from both sides.
+    #[test]
+    fn best_value_matches_the_full_search() {
+        let Some(dict) = crate::test_data::dictionary() else {
+            return;
+        };
+        const END: &str = "3N3Q3M3/3OP2UNTEACH1/3BE2O3N3/3LA2T2MYOPE/2FeR2H1LO4/2O6AB4/2R1F4U3De/2TRIVET1D3AY/4LA1A1IODIZE/4KI1JINX2ES/5R1E1G4O/OUTIES1S3G2R/11L2E/8WAHINES/2EGAlITE2A3";
+        let state = crate::game::SolverState::from_cgp(&format!("{} RCVSDW", END)).unwrap();
+        let ours = state.rack.tiles();
+        let solver = EndgameSolver::new(&dict);
+        for opp in ["AEEIST?", "DGILNOU", "QZ", ""] {
+            let opp: Vec<Tile> = opp
+                .chars()
+                .map(|c| {
+                    if c == '?' {
+                        Tile::blank(' ')
+                    } else {
+                        Tile::new(c)
+                    }
+                })
+                .collect();
+            for (mover, last) in [(&ours, &opp), (&opp, &ours)] {
+                let full = solver.solve(&state.board, mover, last, FinalTurn::Opponent);
+                assert_eq!(
+                    solver.best_value(&state.board, mover, last),
+                    full[0].endgame_value
+                );
+            }
+        }
     }
 }

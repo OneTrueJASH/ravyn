@@ -21,6 +21,7 @@ pub mod game;
 pub mod inference;
 pub mod leaves;
 pub mod mcts;
+pub mod preendgame;
 pub mod rules;
 pub mod sim;
 pub mod solver;
