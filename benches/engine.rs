@@ -1,19 +1,23 @@
 //! Engine benchmarks: move generation, playouts and the endgame solver.
 //!
 //! Run with `cargo bench --bench engine`. Positions are the ones the test
-//! suite uses (EMPTY, MID, END, and BEECH for blank-heavy racks).
+//! suite uses (EMPTY, MID, END, and BEECH for blank-heavy racks). Data is
+//! read from the workspace root (`data/words.fst` and RefEngine's leave table).
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use cpsolver2::dictionary::{load_dictionary_from, Dictionary};
-use cpsolver2::endgame::{EndgameSolver, FinalTurn};
-use cpsolver2::game::SolverState;
-use cpsolver2::mcts::{MctsConfig, MctsEvaluator};
-use cpsolver2::solver::{MoveKind, Solver};
-use cpsolver2::tile::Tile;
+use ravyn::dictionary::Dictionary;
+use ravyn::endgame::{EndgameSolver, FinalTurn};
+use ravyn::game::SolverState;
+use ravyn::leaves::LeaveValues;
+use ravyn::mcts::{MctsConfig, MctsEvaluator};
+use ravyn::sim::{SimSettings, Simulation};
+use ravyn::solver::{MoveKind, Solver};
+use ravyn::tile::Tile;
 
 const EMPTY: &str = "15/15/15/15/15/15/15/15/15/15/15/15/15/15/15";
 const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
@@ -21,7 +25,15 @@ const BEECH: &str = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15";
 const END: &str = "3N3Q3M3/3OP2UNTEACH1/3BE2O3N3/3LA2T2MYOPE/2FeR2H1LO4/2O6AB4/2R1F4U3De/2TRIVET1D3AY/4LA1A1IODIZE/4KI1JINX2ES/5R1E1G4O/OUTIES1S3G2R/11L2E/8WAHINES/2EGAlITE2A3";
 
 fn dictionary() -> Dictionary {
-    load_dictionary_from(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("dictionary")
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dict = Dictionary::load_from_fst(root.join("data/words.fst")).expect("dictionary");
+    match LeaveValues::load(root.join("external/refengine/data/lexica/AMERICAN.klv2")) {
+        Ok(table) => dict.with_leaves(table),
+        Err(e) => {
+            eprintln!("leave table unavailable ({e:#}); heuristic leaves");
+            dict
+        }
+    }
 }
 
 fn state(board: &str, rack: &str) -> SolverState {
@@ -87,6 +99,38 @@ fn playouts(c: &mut Criterion) {
     group.finish();
 }
 
+/// The app's simulation: many candidates raced by [`Simulation::run`].
+/// Unlike `playouts` (20 candidates), the work is spread over hundreds of
+/// arms in rounds, as when the app simulates every play. With no time
+/// budget a run stops when it settles, so the work is fixed for a seed and
+/// criterion reports playouts per second.
+fn simulation(c: &mut Criterion) {
+    let dict = dictionary();
+    let mut group = c.benchmark_group("simulation");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+    for (label, board, rack, n) in [
+        ("beech_AEIO?ST_100", BEECH, "AEIO?ST", 100),
+        ("mid_JSIRATU_300", MID, "JSIRATU", 300),
+    ] {
+        let s = state(board, rack);
+        let mut candidates = s.get_suggestions(&dict);
+        candidates.truncate(n);
+        let settings = SimSettings {
+            max_playouts_per_arm: 64,
+            ..SimSettings::for_bag(s.bag_size(), 16, None)
+        };
+        let run = || {
+            let cancel = AtomicBool::new(false);
+            Simulation::new(settings.clone(), &dict, &s, &candidates, None, None)
+                .run(&cancel, &mut |_| {})
+        };
+        group.throughput(Throughput::Elements(run().playouts));
+        group.bench_function(BenchmarkId::new("run", label), |b| b.iter(run));
+    }
+    group.finish();
+}
+
 fn endgame(c: &mut Criterion) {
     let dict = dictionary();
     let s = state(END, "RCVSDW");
@@ -116,5 +160,5 @@ fn endgame(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, movegen, playouts, endgame);
+criterion_group!(benches, movegen, playouts, simulation, endgame);
 criterion_main!(benches);
