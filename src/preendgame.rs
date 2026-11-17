@@ -21,8 +21,13 @@
 //! remaining cap can beat the best exact result. The best play is always
 //! exact; plays never solved keep their caps and are marked as such.
 //!
-//! Passing (leaving the bag for the opponent to empty) is not evaluated
-//! yet.
+//! Passing leaves the bag for the opponent: if they play, they draw the
+//! last tile, we get one turn and they play last. They may also pass back;
+//! the rules for two passes in a row are not modelled, so that is counted
+//! as ending the game at the current score. That only adds an option for
+//! the opponent, so a pass is never rated higher than it deserves. Their
+//! replies are capped (after any of them we can at least pass and let them
+//! play last) and solved from the highest cap down.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -46,7 +51,7 @@ pub struct DrawOutcome {
     pub value: i32,
 }
 
-/// A play with its pre-endgame evaluation.
+/// A play (or the pass) with its pre-endgame evaluation.
 #[derive(Debug, Clone)]
 pub struct PreEndgameMove {
     pub mv: Move,
@@ -174,7 +179,20 @@ pub fn solve_one_in_bag(
     // Solve from the highest cap down, a batch at a time, until no cap
     // left can beat the best exact result.
     let batch = rayon::current_num_threads().max(1) * 2;
-    let mut solved: Vec<PreEndgameMove> = Vec::new();
+    // The pass, solved exactly; as a known result it also prunes plays.
+    let pass_values = cases
+        .par_iter()
+        .map(|&(tile, _)| {
+            if stopped() {
+                return None;
+            }
+            let theirs = remove(unseen, &[tile]);
+            Some(pass_value(
+                &endgame, board, dictionary, our_rack, &theirs, tile,
+            ))
+        })
+        .collect::<Option<Vec<i32>>>()?;
+    let mut solved: Vec<PreEndgameMove> = vec![summarize(Move::pass(our_rack), pass_values, true)];
     let mut rest = bounded.into_iter().peekable();
     loop {
         if stopped() {
@@ -214,6 +232,70 @@ pub fn solve_one_in_bag(
     solved.sort_by(rank);
     solved.extend(rest);
     Some(solved)
+}
+
+/// What passing is worth to us (spread change to the end of the game)
+/// when the opponent holds `theirs` and `last` is the tile in the bag.
+/// They either play, drawing `last`, after which we get one turn and they
+/// play the final move, or pass back, counted as ending the game (0).
+fn pass_value(
+    endgame: &EndgameSolver,
+    board: &Board,
+    dictionary: &Dictionary,
+    ours: &[Tile],
+    theirs: &[Tile],
+    last: Tile,
+) -> i32 {
+    // Each reply with its cap. After it we get one turn and they play
+    // last, so we get at least the better of passing and our top-scoring
+    // play (each followed by their best final play); the reply is worth at
+    // most its score minus that.
+    let mut replies: Vec<(i32, Move, Board, Vec<Tile>)> = Solver::new(board, dictionary)
+        .find_moves_for(theirs)
+        .into_par_iter()
+        .map(|y| {
+            let mut after = board.clone();
+            for (r, c, t) in &y.tiles_used {
+                after.place_tile(*r, *c, *t);
+            }
+            let mut drawn = remove(theirs, &y.tiles_from_rack());
+            drawn.push(last);
+            let their_final = |b: &Board| Solver::new(b, dictionary).best_score(&drawn) as i32;
+            let mut ours_floor = -their_final(&after);
+            if let Some(z) = Solver::new(&after, dictionary).best_move_by_score(ours) {
+                let mut b2 = after.clone();
+                for (r, c, t) in &z.tiles_used {
+                    b2.place_tile(*r, *c, *t);
+                }
+                ours_floor = ours_floor.max(z.score as i32 - their_final(&b2));
+            }
+            let cap = y.score as i32 - ours_floor;
+            (cap, y, after, drawn)
+        })
+        .collect();
+    replies.sort_by_key(|r| std::cmp::Reverse(r.0));
+    // Solve from the highest cap down, a parallel batch at a time, until no
+    // cap can beat the best reply found.
+    let batch = rayon::current_num_threads().max(1) * 2;
+    let mut best = 0; // passing back
+    let mut rest = replies.iter();
+    loop {
+        let next: Vec<_> = rest
+            .by_ref()
+            .take_while(|(cap, ..)| *cap > best)
+            .take(batch)
+            .collect();
+        if next.is_empty() {
+            break;
+        }
+        let found = next
+            .par_iter()
+            .map(|(_, y, after, drawn)| y.score as i32 - endgame.best_value(after, ours, drawn))
+            .max()
+            .unwrap_or(i32::MIN);
+        best = best.max(found);
+    }
+    -best
 }
 
 /// A blank's designation is irrelevant on a rack or in the bag.
@@ -441,6 +523,48 @@ mod tests {
                     assert!(pruned[0].exact);
                     assert!((pruned[0].win - best_full.0).abs() < 1e-4, "diff {diff}");
                     assert!((pruned[0].spread - best_full.1).abs() < 1e-3, "diff {diff}");
+                }
+            }
+        })
+    }
+
+    /// The pass is always solved, and its value for each last tile is
+    /// what trying every opponent reply gives (with passing back as 0).
+    #[test]
+    fn the_pass_matches_trying_every_reply() {
+        let Some(dict) = crate::test_data::dictionary() else {
+            return;
+        };
+        isolated(|| {
+            let endgame = EndgameSolver::new(&dict);
+            for (board, ours, unseen) in positions(&dict, 1) {
+                let results = solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None).unwrap();
+                let pass = results
+                    .iter()
+                    .find(|r| r.mv.kind == crate::solver::MoveKind::Pass)
+                    .expect("the pass is listed");
+                assert!(pass.exact);
+                for o in pass.outcomes.iter().take(3) {
+                    let last = if o.tile == '?' {
+                        Tile::blank(' ')
+                    } else {
+                        Tile::new(o.tile)
+                    };
+                    let theirs = remove(&unseen, &[last]);
+                    let opp_best = Solver::new(&board, &dict)
+                        .find_moves_for(&theirs)
+                        .iter()
+                        .map(|y| {
+                            let mut after = board.clone();
+                            for (r, c, t) in &y.tiles_used {
+                                after.place_tile(*r, *c, *t);
+                            }
+                            let mut drawn = remove(&theirs, &y.tiles_from_rack());
+                            drawn.push(last);
+                            y.score as i32 - endgame.best_value(&after, &ours, &drawn)
+                        })
+                        .fold(0, i32::max);
+                    assert_eq!(o.value, -opp_best, "last tile {}", o.tile);
                 }
             }
         })
