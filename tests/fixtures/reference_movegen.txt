@@ -1,6 +1,6 @@
 # RefEngine's answers on reference positions, recorded before RefEngine was
-# removed (src/refengine_mcts.rs, write_reference_movegen). Play sets are
-# normalized (best score per placement; single-tile plays keyed by
+# removed (by write_reference_movegen in src/refengine_mcts.rs, now in git
+# history). Play sets are normalized (best score per placement; single-tile plays keyed by
 # square and letter) and stored as a count and an FNV-1a hash of the
 # sorted lines. Tab-separated.
 movegen	named AEINRST	15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 AEINRST/ 0/0 0	1191	db68696f5c23c2d8

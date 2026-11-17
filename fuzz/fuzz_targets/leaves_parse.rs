@@ -2,8 +2,8 @@
 //! or a table whose lookups do not panic.
 #![no_main]
 
-use cpsolver2::leaves::LeaveValues;
-use cpsolver2::tile::Tile;
+use ravyn::leaves::LeaveValues;
+use ravyn::tile::Tile;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

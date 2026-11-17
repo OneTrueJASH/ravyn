@@ -1,18 +1,18 @@
 //! Property tests: CGP round trips, tile conservation, and the place/undo
 //! invariants of applying moves, over random positions.
 
-use std::path::Path;
 use std::sync::OnceLock;
 
 use proptest::prelude::*;
 
-use cpsolver2::board::BOARD_SIZE;
-use cpsolver2::datafiles::{file_status, FileStatus, WORDS_FST};
-use cpsolver2::dictionary::{load_dictionary_from, Dictionary};
-use cpsolver2::game::SolverState;
-use cpsolver2::rules::CROSSPLAY;
-use cpsolver2::solver::MoveKind;
-use cpsolver2::tile::{Tile, RACK_SIZE};
+mod common;
+
+use ravyn::board::BOARD_SIZE;
+use ravyn::dictionary::Dictionary;
+use ravyn::game::SolverState;
+use ravyn::rules::CROSSPLAY;
+use ravyn::solver::MoveKind;
+use ravyn::tile::{Tile, RACK_SIZE};
 
 /// A position drawn without replacement from the real tile set: `board`
 /// tiles on random squares (blanks given random letters) and up to seven
@@ -80,12 +80,7 @@ fn rack_key(state: &SolverState) -> Vec<(bool, char)> {
 
 fn dictionary() -> Option<&'static Dictionary> {
     static DICT: OnceLock<Option<Dictionary>> = OnceLock::new();
-    DICT.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        (file_status(&root.join(WORDS_FST)) == FileStatus::Present)
-            .then(|| load_dictionary_from(root).expect("dictionary"))
-    })
-    .as_ref()
+    DICT.get_or_init(common::dictionary).as_ref()
 }
 
 proptest! {
@@ -217,7 +212,7 @@ proptest! {
     /// (a stable-Rust stand-in for `cargo fuzz`, which needs nightly).
     #[test]
     fn parsers_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..256), text in "\\PC{0,120}") {
-        let _ = cpsolver2::leaves::LeaveValues::parse(&bytes);
+        let _ = ravyn::leaves::LeaveValues::parse(&bytes);
         if let Ok(state) = SolverState::from_cgp(&text) {
             let cgp = state.to_cgp((0, 0));
             let again = SolverState::from_cgp(&cgp).expect("own CGP parses");

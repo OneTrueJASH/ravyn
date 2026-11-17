@@ -7,43 +7,24 @@
 //! when they are missing or Git LFS pointers.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ravyn::board::Direction;
 use ravyn::dictionary::Dictionary;
 use ravyn::game::SolverState;
 use ravyn::inference::{infer_leave, InferenceSettings};
-use ravyn::leaves::{bingo_bonus_correction, LeaveValues};
+use ravyn::leaves::bingo_bonus_correction;
 use ravyn::rules::CROSSPLAY;
 use ravyn::solver::{Move, MoveKind};
 use ravyn::tile::Tile;
 
 const BEECH: &str = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15";
 
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn is_data(path: &Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > 1024 => true,
-        Ok(_) => !std::fs::read(path)
-            .unwrap_or_default()
-            .starts_with(b"version https://git-lfs"),
-        Err(_) => false,
-    }
-}
+mod common;
 
 /// The dictionary with the leave table, or `None` (skip) without data.
 fn dictionary() -> Option<Dictionary> {
-    let words = root().join("data/words.fst");
-    let leaves = root().join("external/refengine/data/lexica/AMERICAN.klv2");
-    if !is_data(&words) || !is_data(&leaves) {
-        eprintln!("skipping: dictionary or leave table missing (or LFS pointers)");
-        return None;
-    }
-    let dict = Dictionary::load_from_fst(&words).expect("dictionary");
-    Some(dict.with_leaves(LeaveValues::load(&leaves).expect("leave table")))
+    common::dictionary_with_leaves()
 }
 
 fn fixture() -> Vec<Vec<String>> {

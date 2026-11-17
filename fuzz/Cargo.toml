@@ -1,5 +1,5 @@
 [package]
-name = "cpsolver2-fuzz"
+name = "ravyn-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -9,8 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-# The parsers under test are pure Rust; leave RefEngine out of fuzz builds.
-cpsolver2 = { path = "..", default-features = false }
+ravyn = { path = ".." }
 
 # Keep this crate out of the main crate's build.
 [workspace]

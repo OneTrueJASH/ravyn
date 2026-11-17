@@ -4,27 +4,18 @@
 //! verifying that the solver, board, rack, endgame, and dictionary
 //! components work together correctly.
 
-use cpsolver2::board::Board;
-use cpsolver2::datafiles::{file_status, FileStatus, WORDS_FST};
-use cpsolver2::dictionary::{load_dictionary_from, Dictionary};
-use cpsolver2::endgame::{EndgameSolver, FinalTurn};
-use cpsolver2::game::SolverState;
-use cpsolver2::solver::MoveKind;
-use cpsolver2::tile::Tile;
+use ravyn::board::Board;
+use ravyn::dictionary::Dictionary;
+use ravyn::endgame::{EndgameSolver, FinalTurn};
+use ravyn::game::SolverState;
+use ravyn::solver::MoveKind;
+use ravyn::tile::Tile;
 
-/// The dictionary from the crate root (independent of the working
-/// directory), or `None` with a message when the data file is missing or
-/// is a Git LFS pointer stub, so the calling test skips.
+mod common;
+
+/// The dictionary, or `None` (skip) without the data file.
 fn dict() -> Option<Dictionary> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    match file_status(&root.join(WORDS_FST)) {
-        FileStatus::Present => {}
-        status => {
-            eprintln!("skipping: {} is {:?}", WORDS_FST, status);
-            return None;
-        }
-    }
-    Some(load_dictionary_from(root).expect("dictionary must load"))
+    common::dictionary()
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +410,7 @@ fn test_blank_tile_move_generation() {
         for (_, _, tile) in &mv.tiles_used {
             if tile.is_blank {
                 assert_eq!(
-                    cpsolver2::rules::CROSSPLAY.tile_value(tile),
+                    ravyn::rules::CROSSPLAY.tile_value(tile),
                     0,
                     "Blank tile should have 0 point value"
                 );

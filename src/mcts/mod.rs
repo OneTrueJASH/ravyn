@@ -18,9 +18,9 @@
 //!
 //! If a playout hits the ply limit before the game ends, the position is
 //! scored by the spread so far plus the phase-scaled leave values. This is
-//! the pre-endgame engine (bag of 1–7 tiles), where RefEngine's simulation
-//! would apply Scrabble's go-out rules, and the general fallback when
-//! RefEngine is unavailable. It is not meant for positions where the bag is
+//! the engine for bags of 2–7 tiles too (one tile is solved exactly by
+//! [`crate::preendgame`]), with Crossplay's equal-turn ending played out
+//! exactly inside each playout. It is not meant for positions where the bag is
 //! already empty: who owns the final turn is then outside its knowledge,
 //! and [`crate::endgame::EndgameSolver`] handles those exactly.
 

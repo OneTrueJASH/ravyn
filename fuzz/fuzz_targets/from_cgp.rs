@@ -2,7 +2,7 @@
 //! that writes back to CGP and reads back to the same position.
 #![no_main]
 
-use cpsolver2::game::SolverState;
+use ravyn::game::SolverState;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
