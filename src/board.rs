@@ -1,13 +1,15 @@
-//! 15x15 Crossplay game board with cells, premium squares, and direction types.
+//! The 15x15 board: cells, premium squares and directions. The premium
+//! layout comes from the board's [`Rules`].
 //!
 //! Provides the [`Board`] struct, anchor detection, and tile placement logic.
 
+use crate::rules::{Rules, CROSSPLAY};
 use crate::tile::Tile;
 
 /// Side length of the square game board.
 pub const BOARD_SIZE: usize = 15;
 
-/// Premium square types on the Crossplay board
+/// Premium square types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Premium {
     Normal,
@@ -15,7 +17,9 @@ pub enum Premium {
     TripleLetter,
     DoubleWord,
     TripleWord,
-    Center, // Center star (must be played on first move, scores as normal)
+    /// Crossplay's centre star: the first play covers it; it scores as a
+    /// plain square.
+    Center,
 }
 
 impl Premium {
@@ -79,108 +83,33 @@ impl Cell {
     }
 }
 
-/// The 15x15 Crossplay game board
+/// A 15x15 board: its squares and the rules it is played under.
 #[derive(Debug, Clone)]
 pub struct Board {
     pub cells: [[Cell; BOARD_SIZE]; BOARD_SIZE],
+    rules: &'static Rules,
 }
 
 impl Board {
-    /// Create a new board with Crossplay premium square layout
+    /// An empty board under [`CROSSPLAY`] rules.
     pub fn new() -> Self {
-        // Initialize all cells as Normal
-        let mut cells: [[Cell; BOARD_SIZE]; BOARD_SIZE] =
-            std::array::from_fn(|_| std::array::from_fn(|_| Cell::new(Premium::Normal)));
+        Self::with_rules(&CROSSPLAY)
+    }
 
-        // Set up premium squares based on actual NYT Crossplay layout
-        // Triple Word squares (purple)
-        let triple_word = [
-            (0, 3),
-            (0, 11),
-            (3, 0),
-            (3, 14),
-            (11, 0),
-            (11, 14),
-            (14, 3),
-            (14, 11),
-        ];
-        for (r, c) in triple_word {
-            cells[r][c].premium = Premium::TripleWord;
+    /// An empty board under `rules`, with its premium squares.
+    pub fn with_rules(rules: &'static Rules) -> Self {
+        Board {
+            cells: std::array::from_fn(|r| {
+                std::array::from_fn(|c| Cell::new(rules.premiums[r][c]))
+            }),
+            rules,
         }
+    }
 
-        // Double Word squares (light blue/lavender)
-        let double_word = [
-            (1, 1),
-            (1, 13),
-            (3, 7),
-            (7, 3),
-            (7, 11),
-            (11, 7),
-            (13, 1),
-            (13, 13),
-        ];
-        for (r, c) in double_word {
-            cells[r][c].premium = Premium::DoubleWord;
-        }
-
-        // Center star
-        cells[7][7].premium = Premium::Center;
-
-        // Triple Letter squares (green)
-        let triple_letter = [
-            (0, 0),
-            (0, 14),
-            (1, 6),
-            (1, 8),
-            (4, 5),
-            (4, 9),
-            (5, 4),
-            (5, 10),
-            (6, 1),
-            (6, 13),
-            (8, 1),
-            (8, 13),
-            (9, 4),
-            (9, 10),
-            (10, 5),
-            (10, 9),
-            (13, 6),
-            (13, 8),
-            (14, 0),
-            (14, 14),
-        ];
-        for (r, c) in triple_letter {
-            cells[r][c].premium = Premium::TripleLetter;
-        }
-
-        // Double Letter squares (tan/beige)
-        let double_letter = [
-            (0, 7),   // H1
-            (2, 4),   // E3
-            (2, 10),  // K3
-            (3, 3),   // D4
-            (3, 11),  // L4
-            (4, 2),   // C5
-            (4, 12),  // M5
-            (5, 7),   // H6
-            (7, 0),   // A8
-            (7, 5),   // F8
-            (7, 9),   // J8
-            (7, 14),  // O8
-            (9, 7),   // H10
-            (10, 2),  // C11
-            (10, 12), // M11
-            (11, 3),  // D12
-            (11, 11), // L12
-            (12, 4),  // E13
-            (12, 10), // K13
-            (14, 7),  // H15
-        ];
-        for (r, c) in double_letter {
-            cells[r][c].premium = Premium::DoubleLetter;
-        }
-
-        Board { cells }
+    /// The rules this board is played under.
+    #[inline]
+    pub fn rules(&self) -> &'static Rules {
+        self.rules
     }
 
     /// Get the cell at a position (0-indexed)

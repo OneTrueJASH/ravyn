@@ -4,7 +4,7 @@
 
 use super::playout::{normal_cdf, rack_from, Player, Playout, TEMPO};
 use super::*;
-use crate::game::full_tile_set;
+use crate::rules::CROSSPLAY;
 use crate::solver::{MoveKind, Solver};
 use crate::tile::{Tile, RACK_SIZE};
 use fastrand::Rng;
@@ -440,7 +440,7 @@ fn study_loss_calibration() {
 
     let full_counts = {
         let mut counts = std::collections::HashMap::new();
-        for t in full_tile_set() {
+        for t in CROSSPLAY.full_tile_set() {
             let c = if t.is_blank { '?' } else { t.letter };
             *counts.entry(c).or_insert(0u32) += 1;
         }

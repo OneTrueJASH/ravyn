@@ -7,71 +7,17 @@ use std::collections::HashMap;
 
 use crate::board::{Board, BOARD_SIZE};
 use crate::dictionary::Dictionary;
+use crate::rules::Rules;
 use crate::solver::{rack_counts, tiles_from_counts, LeaveTable, Move, Solver, EXCHANGE_MIN_BAG};
 use crate::tile::{Rack, Tile, RACK_SIZE};
 
-/// Total number of tiles in a standard Crossplay game.
-pub const TOTAL_TILES: usize = 100;
-
-/// Number of blank (wildcard) tiles in the distribution.
-pub const BLANK_COUNT: usize = 3;
-
-/// Tile distribution for Crossplay (100 tiles)
-fn standard_distribution() -> HashMap<char, u32> {
-    let dist: HashMap<char, u32> = [
-        ('A', 9),
-        ('B', 2),
-        ('C', 2),
-        ('D', 4),
-        ('E', 12),
-        ('F', 2),
-        ('G', 3),
-        ('H', 3),
-        ('I', 8),
-        ('J', 1),
-        ('K', 1),
-        ('L', 4),
-        ('M', 2),
-        ('N', 5),
-        ('O', 8),
-        ('P', 2),
-        ('Q', 1),
-        ('R', 6),
-        ('S', 5),
-        ('T', 6),
-        ('U', 3),
-        ('V', 2),
-        ('W', 2),
-        ('X', 1),
-        ('Y', 2),
-        ('Z', 1),
-        ('?', BLANK_COUNT as u32), // ? = blank
-    ]
-    .into_iter()
-    .collect();
-    debug_assert_eq!(
-        dist.values().sum::<u32>() as usize,
-        TOTAL_TILES,
-        "Tile distribution must sum to TOTAL_TILES"
-    );
-    dist
-}
-
-/// Every tile in a fresh bag, in distribution order.
-pub fn full_tile_set() -> Vec<Tile> {
-    let mut dist: Vec<(char, u32)> = standard_distribution().into_iter().collect();
-    dist.sort();
-    let mut tiles = Vec::with_capacity(TOTAL_TILES);
-    for (letter, count) in dist {
-        for _ in 0..count {
-            tiles.push(if letter == '?' {
-                Tile::blank(' ')
-            } else {
-                Tile::new(letter)
-            });
-        }
-    }
-    tiles
+/// Tiles of each kind in a fresh bag under `rules`, keyed by letter
+/// (`'?'` for blanks).
+fn distribution(rules: &Rules) -> HashMap<char, u32> {
+    ('A'..='Z')
+        .chain(std::iter::once('?'))
+        .map(|c| (c, rules.count(c)))
+        .collect()
 }
 
 /// Every distinct exchange from `rack` (one per multiset of exchanged
@@ -211,7 +157,10 @@ pub fn observed_move_loss(
         .count();
     // The unseen count from their side of the table when they moved, and
     // the bag size then (they had not yet redrawn).
-    let their_unseen = TOTAL_TILES.saturating_sub(prev_count + RACK_SIZE);
+    let their_unseen = prev_board
+        .rules()
+        .total_tiles()
+        .saturating_sub(prev_count + RACK_SIZE);
     let bag_then = (pool_tiles.len() + placed.len()).saturating_sub(RACK_SIZE);
 
     let solver = Solver::new(prev_board, dictionary);
@@ -340,7 +289,7 @@ impl SolverState {
     /// Calculate unseen tiles (tiles not on board or in our rack)
     /// This includes both the bag AND opponent's rack
     pub fn unseen_tiles(&self) -> HashMap<char, u32> {
-        let total = standard_distribution();
+        let total = distribution(self.board.rules());
         let board = self.count_board_tiles();
         let rack = self.count_rack_tiles();
 
@@ -654,7 +603,7 @@ mod tests {
         let state = SolverState::new();
         let unseen = state.unseen_tiles();
         let total: u32 = unseen.values().sum();
-        assert_eq!(total as usize, TOTAL_TILES);
+        assert_eq!(total as usize, crate::rules::CROSSPLAY.total_tiles());
     }
 
     #[test]
@@ -677,7 +626,7 @@ mod tests {
         assert!(!state.is_endgame());
 
         // Place enough tiles to leave exactly 7 unseen
-        let dist = standard_distribution();
+        let dist = distribution(&crate::rules::CROSSPLAY);
         let mut placed = 0;
         let target = 93;
         'outer: for (&letter, &count) in &dist {

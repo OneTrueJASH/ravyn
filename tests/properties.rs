@@ -9,7 +9,8 @@ use proptest::prelude::*;
 use cpsolver2::board::BOARD_SIZE;
 use cpsolver2::datafiles::{file_status, FileStatus, WORDS_FST};
 use cpsolver2::dictionary::{load_dictionary_from, Dictionary};
-use cpsolver2::game::{full_tile_set, SolverState};
+use cpsolver2::game::SolverState;
+use cpsolver2::rules::CROSSPLAY;
 use cpsolver2::solver::MoveKind;
 use cpsolver2::tile::{Tile, RACK_SIZE};
 
@@ -25,7 +26,7 @@ fn position() -> impl Strategy<Value = SolverState> {
     )
         .prop_map(|(seed, on_board, in_rack, squares)| {
             let mut rng = fastrand::Rng::with_seed(seed);
-            let mut bag = full_tile_set();
+            let mut bag = CROSSPLAY.full_tile_set();
             rng.shuffle(&mut bag);
             let mut state = SolverState::new();
             let mut placed = 0;
@@ -117,7 +118,7 @@ proptest! {
             *counts.entry(if t.is_blank { '?' } else { t.letter }).or_default() += 1;
         }
         let mut full = std::collections::HashMap::new();
-        for t in full_tile_set() {
+        for t in CROSSPLAY.full_tile_set() {
             *full.entry(if t.is_blank { '?' } else { t.letter }).or_insert(0u32) += 1;
         }
         prop_assert_eq!(counts, full);
@@ -155,7 +156,7 @@ proptest! {
         };
         // A real position: a few greedy plays from a fresh bag.
         let mut rng = fastrand::Rng::with_seed(seed);
-        let mut bag = full_tile_set();
+        let mut bag = CROSSPLAY.full_tile_set();
         rng.shuffle(&mut bag);
         let mut state = SolverState::new();
         for _ in 0..rng.usize(0..6) {

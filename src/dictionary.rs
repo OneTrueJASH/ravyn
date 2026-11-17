@@ -7,7 +7,8 @@ use fst::raw::{CompiledAddr, Fst};
 use fst::Set;
 
 use crate::leaves::{bingo_bonus_correction, LeaveValues};
-use crate::solver::{leave_value_with_phase, BINGO_BONUS};
+use crate::rules::{Rules, CROSSPLAY};
+use crate::solver::leave_value_with_phase;
 use crate::tile::Tile;
 
 /// A node of the flattened word graph: where its outgoing arcs start, how
@@ -130,6 +131,9 @@ pub struct Dictionary {
     leaves: Option<LeaveValues>,
     /// How leave values are weighted by game phase.
     phase: PhaseScaling,
+    /// Bingo bonus of the rules being played, for the leave table's
+    /// bingo-bonus correction.
+    bingo_bonus: u32,
 }
 
 /// How leave values are weighted as the bag runs out (see
@@ -194,6 +198,7 @@ impl Dictionary {
             word_count: count,
             leaves: None,
             phase: PhaseScaling::default(),
+            bingo_bonus: CROSSPLAY.bingo_bonus,
         })
     }
 
@@ -202,6 +207,18 @@ impl Dictionary {
     pub fn with_leaves(mut self, leaves: LeaveValues) -> Self {
         self.leaves = Some(leaves);
         self
+    }
+
+    /// Value leaves for `rules` (their bingo bonus). A loaded dictionary
+    /// starts out set for [`CROSSPLAY`].
+    pub fn for_rules(mut self, rules: &Rules) -> Self {
+        self.bingo_bonus = rules.bingo_bonus;
+        self
+    }
+
+    /// The bingo bonus leaves are valued for.
+    pub fn bingo_bonus(&self) -> u32 {
+        self.bingo_bonus
     }
 
     /// Use `phase` to weight leave values by game phase.
@@ -225,8 +242,8 @@ impl Dictionary {
     /// (`unseen` = bag + opponent rack; `None` means full weight).
     ///
     /// Uses the fitted leave table when loaded and the leave is in it (the
-    /// table covers 1–6 tiles), corrected from Scrabble's 50-point bingo
-    /// bonus to Crossplay's 40 (see [`bingo_bonus_correction`]); otherwise
+    /// table covers 1–6 tiles), corrected from the table's 50-point bingo
+    /// bonus to the rules' (see [`bingo_bonus_correction`]); otherwise
     /// the per-letter heuristic.
     ///
     /// A full 7-tile rack (the racks at a playout cut-off) is valued on the
@@ -238,7 +255,7 @@ impl Dictionary {
         }
         let scale = self.phase.scale(unseen);
         if let Some(table) = &self.leaves {
-            if let Some(v) = Self::table_value(table, leave) {
+            if let Some(v) = self.table_value(table, leave) {
                 return v * scale;
             }
             if leave.len() == crate::tile::RACK_SIZE {
@@ -251,7 +268,7 @@ impl Dictionary {
                         .filter(|(i, _)| *i != skip)
                         .map(|(_, t)| *t)
                         .collect();
-                    if let Some(v) = Self::table_value(table, &sub) {
+                    if let Some(v) = self.table_value(table, &sub) {
                         total += v;
                         found += 1;
                     }
@@ -271,8 +288,8 @@ impl Dictionary {
     /// is valued at what the second adds over the first. Without this a
     /// three-blank leave fell back to the per-letter heuristic, on a
     /// different scale from every other leave.
-    fn table_value(table: &LeaveValues, leave: &[Tile]) -> Option<f32> {
-        let correction = bingo_bonus_correction(leave, BINGO_BONUS);
+    fn table_value(&self, table: &LeaveValues, leave: &[Tile]) -> Option<f32> {
+        let correction = bingo_bonus_correction(leave, self.bingo_bonus);
         if let Some(v) = table.value(leave) {
             return Some(v + correction);
         }

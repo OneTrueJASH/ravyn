@@ -13,11 +13,8 @@ use std::collections::HashMap;
 
 use crate::board::{Board, Direction, Premium, BOARD_SIZE};
 use crate::dictionary::{DawgNode, Dictionary};
-use crate::game::TOTAL_TILES;
-use crate::tile::{letter_value, Rack, Tile, RACK_SIZE};
-
-/// Bonus points awarded when a player uses all tiles from their rack in a single turn.
-pub const BINGO_BONUS: u32 = 40;
+use crate::rules::Rules;
+use crate::tile::{Rack, Tile, RACK_SIZE};
 
 /// Bitmask with every letter A–Z allowed.
 const ALL_LETTERS: u32 = (1 << 26) - 1;
@@ -275,25 +272,12 @@ fn index_letter(idx: usize) -> char {
     (b'A' + idx as u8) as char
 }
 
-/// Configuration for the solver
-#[derive(Debug, Clone)]
-pub struct SolverConfig {
-    pub bingo_bonus: u32,
-}
-
-impl Default for SolverConfig {
-    fn default() -> Self {
-        SolverConfig {
-            bingo_bonus: BINGO_BONUS, // Crossplay uses 40-point bingo bonus
-        }
-    }
-}
-
 /// The move generation solver
 pub struct Solver<'a> {
     board: &'a Board,
     dictionary: &'a Dictionary,
-    config: SolverConfig,
+    /// The board's rules, kept at hand for the search.
+    rules: &'static Rules,
 }
 
 /// Board-derived tables that depend only on the position, not the rack.
@@ -536,7 +520,7 @@ impl<'a> Solver<'a> {
         Solver {
             board,
             dictionary,
-            config: SolverConfig::default(),
+            rules: board.rules(),
         }
     }
 
@@ -616,8 +600,10 @@ impl<'a> Solver<'a> {
 
     /// Unseen tiles from the mover's side (bag + other rack), the phase
     /// indicator for leave values.
-    fn unseen_for(info: &BoardInfo, rack_len: usize) -> usize {
-        TOTAL_TILES.saturating_sub(info.tile_count + rack_len)
+    fn unseen_for(&self, info: &BoardInfo, rack_len: usize) -> usize {
+        self.rules
+            .total_tiles()
+            .saturating_sub(info.tile_count + rack_len)
     }
 
     /// Rebuild a [`Move`] from a snapshot taken during the search.
@@ -627,7 +613,10 @@ impl<'a> Solver<'a> {
             .flat_map(|r| (0..BOARD_SIZE).map(move |c| (r, c)))
             .filter(|&(r, c)| self.board.get_tile(r, c).is_some())
             .count();
-        let unseen = TOTAL_TILES.saturating_sub(tile_count + tiles.len());
+        let unseen = self
+            .rules
+            .total_tiles()
+            .saturating_sub(tile_count + tiles.len());
         let mut leaves = LeaveTable::new(counts, self.dictionary, Some(unseen));
         self.materialize_with(snap, &mut leaves)
     }
@@ -676,7 +665,7 @@ impl<'a> Solver<'a> {
         }
 
         let info = self.analyze_board();
-        let unseen = Self::unseen_for(&info, tiles.len());
+        let unseen = self.unseen_for(&info, tiles.len());
         let counts = rack_counts(tiles);
         let leaves = LeaveTable::new(counts, self.dictionary, Some(unseen));
         let leave_index = leaves.full_index();
@@ -776,12 +765,17 @@ impl<'a> Solver<'a> {
                 let premium = self.premium_at(ur, uc);
                 let lm = premium.letter_multiplier();
                 let wm = premium.word_multiplier();
-                main_sum += tile.value() * lm;
+                main_sum += self.rules.tile_value(&tile) * lm;
                 word_mult *= wm;
-                cross_total +=
-                    self.cross_word_score(ur, uc, tile.value() * lm, wm, dir.perpendicular());
+                cross_total += self.cross_word_score(
+                    ur,
+                    uc,
+                    self.rules.tile_value(&tile) * lm,
+                    wm,
+                    dir.perpendicular(),
+                );
             } else if let Some(tile) = self.board.get_tile(ur, uc) {
-                main_sum += tile.value();
+                main_sum += self.rules.tile_value(tile);
             } else {
                 break;
             }
@@ -791,7 +785,7 @@ impl<'a> Solver<'a> {
 
         let mut score = main_sum * word_mult + cross_total;
         if placed_tiles.len() == RACK_SIZE {
-            score += self.config.bingo_bonus;
+            score += self.rules.bingo_bonus;
         }
         score
     }
@@ -825,7 +819,7 @@ impl<'a> Solver<'a> {
         while Board::is_valid_position(r, c) {
             match self.board.get_tile(r as usize, c as usize) {
                 Some(t) => {
-                    sum += t.value();
+                    sum += self.rules.tile_value(t);
                     found = true;
                     r -= dr;
                     c -= dc;
@@ -839,7 +833,7 @@ impl<'a> Solver<'a> {
         while Board::is_valid_position(r, c) {
             match self.board.get_tile(r as usize, c as usize) {
                 Some(t) => {
-                    sum += t.value();
+                    sum += self.rules.tile_value(t);
                     found = true;
                     r += dr;
                     c += dc;
@@ -874,7 +868,8 @@ impl<'a> Solver<'a> {
         }
 
         if info.tile_count == 0 {
-            info.anchor[BOARD_SIZE / 2][BOARD_SIZE / 2] = true;
+            let (r, c) = self.rules.start;
+            info.anchor[r][c] = true;
             return info;
         }
 
@@ -917,7 +912,7 @@ impl<'a> Solver<'a> {
                 Some(t) => {
                     prefix[prefix_len] = t.letter as u8;
                     prefix_len += 1;
-                    score += t.value();
+                    score += self.rules.tile_value(t);
                     r -= dr;
                     c -= dc;
                 }
@@ -934,7 +929,7 @@ impl<'a> Solver<'a> {
                 Some(t) => {
                     suffix[suffix_len] = t.letter as u8;
                     suffix_len += 1;
-                    score += t.value();
+                    score += self.rules.tile_value(t);
                     r += dr;
                     c += dc;
                 }
@@ -1057,7 +1052,7 @@ impl<'s, 'a> Gen<'s, 'a> {
                 }
                 self.word[self.word_len] = letter_index(tile.letter).unwrap_or(0) as u8;
                 self.word_len += 1;
-                sum += tile.value();
+                sum += self.solver.rules.tile_value(tile);
             }
             self.word_start = start;
             self.extend_right(node, anchor, sum, 1, 0);
@@ -1144,7 +1139,7 @@ impl<'s, 'a> Gen<'s, 'a> {
             let value = if self.placed[i].is_blank {
                 0
             } else {
-                letter_value(index_letter(self.placed[i].letter))
+                self.solver.rules.index_value(self.placed[i].letter)
             };
             main_sum += value * premium.letter_multiplier();
             word_mult *= premium.word_multiplier();
@@ -1179,7 +1174,7 @@ impl<'s, 'a> Gen<'s, 'a> {
                 self.extend_right(
                     child,
                     pos + 1,
-                    main_sum + tile.value(),
+                    main_sum + self.solver.rules.tile_value(tile),
                     word_mult,
                     cross_total,
                 );
@@ -1228,7 +1223,7 @@ impl<'s, 'a> Gen<'s, 'a> {
             let value = if is_blank {
                 0
             } else {
-                letter_value(index_letter(idx))
+                self.solver.rules.index_value(idx)
             };
             let placed_value = value * lm;
             let new_cross = if has_cross {
@@ -1272,7 +1267,7 @@ impl<'s, 'a> Gen<'s, 'a> {
         let n = self.placed_len;
         let mut score = raw_score;
         if n == RACK_SIZE {
-            score += self.solver.config.bingo_bonus;
+            score += self.solver.rules.bingo_bonus;
         }
 
         // Work on a copy: the blank fix-up below may move blank flags between
@@ -1389,7 +1384,7 @@ impl<'s, 'a> Gen<'s, 'a> {
             let mut idxs: Vec<usize> = (0..n).filter(|&j| placed[j].letter == letter).collect();
             idxs.sort_by_key(|&j| std::cmp::Reverse(coef(&placed[j])));
             let real_count = idxs.iter().filter(|&&j| !placed[j].is_blank).count();
-            let value = letter_value(index_letter(letter)) as i64;
+            let value = self.solver.rules.index_value(letter) as i64;
 
             let before: i64 = idxs
                 .iter()
@@ -1922,7 +1917,7 @@ mod tests {
         assert!(retains.leave.is_empty());
         // 7 one-point tiles on row 7 starting at col 3 (DW) with DL at 5 and 9:
         // (1+1+2+1+1+1+2) * 2 = 18, plus 40 bingo.
-        assert_eq!(retains.score, 18 + BINGO_BONUS);
+        assert_eq!(retains.score, 18 + crate::rules::CROSSPLAY.bingo_bonus);
         assert_eq!(retains.coords(), "8D");
     }
 

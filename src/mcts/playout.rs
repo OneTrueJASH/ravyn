@@ -5,7 +5,7 @@ use fastrand::Rng;
 
 use crate::board::{Board, Direction, BOARD_SIZE};
 use crate::dictionary::Dictionary;
-use crate::game::{best_exchange, full_tile_set, top_exchanges, SolverState};
+use crate::game::{best_exchange, top_exchanges, SolverState};
 use crate::solver::{Move, MoveKind, Solver, EXCHANGE_MIN_BAG};
 #[cfg(test)]
 use crate::tile::Rack;
@@ -409,11 +409,12 @@ impl<'a> Playout<'a> {
     /// A fresh game: empty board, shuffled full bag, both racks drawn.
     pub(super) fn new_game(dict: &'a Dictionary, seed: u64) -> Self {
         let mut rng = Rng::with_seed(seed);
-        let mut bag = full_tile_set();
+        let board = Board::new();
+        let mut bag = board.rules().full_tile_set();
         rng.shuffle(&mut bag);
         let us: Vec<Tile> = bag.drain(bag.len() - RACK_SIZE..).collect();
         let opp: Vec<Tile> = bag.drain(bag.len() - RACK_SIZE..).collect();
-        Self::new(dict, Board::new(), [us, opp], bag, rng.u64(..))
+        Self::new(dict, board, [us, opp], bag, rng.u64(..))
     }
 
     /// Play the game out from `to_move`'s turn. Returns the final spread

@@ -7,6 +7,10 @@
 //! arms race until their mean Ȳₙ separates them. The bag-empty ending is
 //! solved exactly ([`endgame`]).
 //!
+//! The rules (board layout, tile values and distribution, bingo bonus,
+//! ending) are data ([`rules`]): every board carries its own, and
+//! [`rules::CROSSPLAY`] is the default.
+//!
 //! Diagnostics go through the [`log`](https://docs.rs/log) facade; an
 //! application installs whichever logger it likes.
 
@@ -16,6 +20,7 @@ pub mod endgame;
 pub mod game;
 pub mod leaves;
 pub mod mcts;
+pub mod rules;
 pub mod sim;
 pub mod solver;
 pub mod stats;

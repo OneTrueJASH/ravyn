@@ -418,7 +418,11 @@ fn test_blank_tile_move_generation() {
     for mv in &blank_moves {
         for (_, _, tile) in &mv.tiles_used {
             if tile.is_blank {
-                assert_eq!(tile.value(), 0, "Blank tile should have 0 point value");
+                assert_eq!(
+                    cpsolver2::rules::CROSSPLAY.tile_value(tile),
+                    0,
+                    "Blank tile should have 0 point value"
+                );
                 assert!(
                     tile.letter.is_ascii_uppercase(),
                     "Blank tile should be designated as an uppercase letter, got '{}'",

@@ -1,6 +1,5 @@
-//! Tile representation, letter point values (Crossplay scoring), and 7-slot rack.
-//!
-//! Crossplay uses different point values than standard Scrabble.
+//! Tiles and the 7-slot rack. Point values belong to the rules
+//! ([`crate::rules::Rules::tile_value`]).
 
 /// Number of tile slots in a player's rack.
 pub const RACK_SIZE: usize = 7;
@@ -25,29 +24,6 @@ impl Tile {
             letter: designated_letter.to_ascii_uppercase(),
             is_blank: true,
         }
-    }
-
-    /// Get the point value of this tile (blanks are always 0)
-    pub fn value(&self) -> u32 {
-        if self.is_blank {
-            return 0;
-        }
-        letter_value(self.letter)
-    }
-}
-
-/// Get the point value of a letter (Crossplay-specific values)
-pub fn letter_value(letter: char) -> u32 {
-    match letter.to_ascii_uppercase() {
-        'A' | 'E' | 'I' | 'N' | 'O' | 'R' | 'S' | 'T' => 1,
-        'D' | 'L' | 'U' => 2,
-        'C' | 'H' | 'M' | 'P' => 3,
-        'B' | 'F' | 'G' | 'Y' => 4,
-        'W' => 5,
-        'K' | 'V' => 6,
-        'X' => 8,
-        'J' | 'Q' | 'Z' => 10,
-        _ => 0,
     }
 }
 
@@ -115,23 +91,6 @@ impl Default for Rack {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_letter_values() {
-        // Crossplay values
-        assert_eq!(letter_value('E'), 1);
-        assert_eq!(letter_value('A'), 1);
-        assert_eq!(letter_value('D'), 2);
-        assert_eq!(letter_value('C'), 3);
-        assert_eq!(letter_value('B'), 4);
-        assert_eq!(letter_value('W'), 5);
-        assert_eq!(letter_value('K'), 6);
-        assert_eq!(letter_value('V'), 6);
-        assert_eq!(letter_value('X'), 8);
-        assert_eq!(letter_value('Q'), 10);
-        assert_eq!(letter_value('Z'), 10);
-        assert_eq!(letter_value('J'), 10);
-    }
 
     #[test]
     fn test_rack_operations() {

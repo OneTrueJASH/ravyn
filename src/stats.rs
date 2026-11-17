@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::game::SolverState;
-use crate::tile::{letter_value, RACK_SIZE};
+use crate::tile::RACK_SIZE;
 
 /// Game phase based on unseen tiles (bag + opponent's rack)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +118,7 @@ impl GameStats {
                 blanks += 1;
             } else {
                 let letter = tile.letter;
-                value += letter_value(letter);
+                value += state.board.rules().letter_value(letter);
 
                 if VOWELS.contains(&letter) {
                     vowels += 1;
