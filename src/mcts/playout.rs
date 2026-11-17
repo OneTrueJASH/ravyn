@@ -6,6 +6,7 @@ use fastrand::Rng;
 use crate::board::{Board, Direction, BOARD_SIZE};
 use crate::dictionary::Dictionary;
 use crate::game::{best_exchange, top_exchanges, SolverState};
+use crate::rules::Ending;
 use crate::solver::{Move, MoveKind, Solver, EXCHANGE_MIN_BAG};
 #[cfg(test)]
 use crate::tile::Rack;
@@ -63,8 +64,12 @@ pub(super) struct Playout<'a> {
     pub(super) bag: Vec<Tile>,
     /// Signed spread from our point of view.
     pub(super) spread: i32,
-    /// Player who drew the last tile, once the bag is empty.
+    /// Player who drew the last tile, once the bag is empty (Crossplay's
+    /// equal-turn ending only).
     pub(super) final_turn_owner: Option<Player>,
+    /// Turns in a row that scored nothing (passes, exchanges, zero-point
+    /// plays), for the go-out ending's six-scoreless-turns rule.
+    pub(super) scoreless: usize,
     /// For returning exchanged tiles to random places in the bag.
     pub(super) rng: Rng,
     /// Whether each player's first move in this playout was a bingo.
@@ -115,6 +120,7 @@ impl<'a> Playout<'a> {
             bag,
             spread: 0,
             final_turn_owner: None,
+            scoreless: 0,
             rng: Rng::with_seed(seed),
             first_move_bingo: [None, None],
             opp_temperature: 0.0,
@@ -220,6 +226,7 @@ impl<'a> Playout<'a> {
             rack.swap_remove(idx);
         }
         self.last_was_pass = mv.kind == MoveKind::Pass;
+        self.scoreless = if mv.score == 0 { self.scoreless + 1 } else { 0 };
         let signed = mv.score as i32;
         self.spread += if p == Player::Us { signed } else { -signed };
         if self.first_move_bingo[p as usize].is_none() {
@@ -241,7 +248,7 @@ impl<'a> Playout<'a> {
         }
         // Only a play can draw the last tile: an exchange puts back as many
         // as it took, so the bag is checked after the return.
-        if need > 0 && self.bag.is_empty() {
+        if need > 0 && self.bag.is_empty() && self.board.rules().ending == Ending::EqualTurn {
             self.final_turn_owner = Some(p);
         }
         if self.trace.is_some() {
@@ -259,6 +266,40 @@ impl<'a> Playout<'a> {
     }
 
     /// Our rack's leave value minus the opponent's, phase-scaled.
+    /// The go-out ending, from `to_move`'s turn with the bag empty: both
+    /// sides take their highest-scoring play (or pass) until one goes out,
+    /// gaining twice the other's rack value in spread, or six turns in a
+    /// row score nothing and each loses their own rack's value. Leave
+    /// values no longer matter once nothing can be drawn, so moves are
+    /// chosen by score; the exact endgame search is a separate solver.
+    fn play_to_the_end(&mut self, mut to_move: Player) -> PlayoutOutcome {
+        let rules = self.board.rules();
+        let value = |rack: &[Tile]| rack.iter().map(|t| rules.tile_value(t) as i32).sum::<i32>();
+        let sign = |p: Player| if p == Player::Us { 1 } else { -1 };
+        loop {
+            let last = to_move.other();
+            if self.rack(last).is_empty() {
+                self.spread += sign(last) * 2 * value(self.rack(to_move));
+                break;
+            }
+            if self.scoreless >= Ending::SCORELESS_TURNS_TO_END {
+                self.spread -= value(self.rack(Player::Us));
+                self.spread += value(self.rack(Player::Opp));
+                break;
+            }
+            let mv = self
+                .best_by_score(to_move)
+                .unwrap_or_else(|| Move::pass(self.rack(to_move)));
+            self.commit(to_move, &mv);
+            to_move = last;
+        }
+        PlayoutOutcome {
+            value: self.spread as f32,
+            finished: true,
+            bag: 0,
+        }
+    }
+
     pub(super) fn leave_adjustment(&self) -> f32 {
         let unseen = self.unseen_for_phase();
         self.dict.leave_value(self.rack(Player::Us), Some(unseen))
@@ -438,6 +479,9 @@ impl<'a> Playout<'a> {
         };
         let mut plies = 0;
         loop {
+            if self.board.rules().ending == Ending::GoOut && self.bag.is_empty() {
+                return self.play_to_the_end(to_move);
+            }
             match self.final_turn_owner {
                 Some(owner) if owner == to_move => {
                     // Final move of the game: take the points.

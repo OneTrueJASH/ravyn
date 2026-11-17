@@ -11,6 +11,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use crate::board::Board;
 use crate::dictionary::Dictionary;
 use crate::game::SolverState;
+use crate::rules::Ending;
 use crate::solver::{Move, MoveKind};
 use crate::tile::{Tile, RACK_SIZE};
 
@@ -287,7 +288,10 @@ impl<'a> CandidateSim<'a> {
             playout.opp_temperature = self.model.map(|m| m.temperature).unwrap_or(0.0);
             // If our move emptied the bag, we own the final turn: the
             // opponent gets one last turn and then we play the final move.
-            if playout.bag.is_empty() && self.bag_size > 0 {
+            if playout.bag.is_empty()
+                && self.bag_size > 0
+                && self.board.rules().ending == Ending::EqualTurn
+            {
                 playout.final_turn_owner = Some(Player::Us);
             }
 

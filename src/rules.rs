@@ -3,8 +3,8 @@
 //!
 //! Every board carries its rules (see [`crate::board::Board::with_rules`]),
 //! so scoring, move generation, tile counting and the simulation read them
-//! from the position they are given. [`CROSSPLAY`] is the only preset so
-//! far; board and rack size are fixed at compile time
+//! from the position they are given. [`CROSSPLAY`] and [`SCRABBLE`] are the
+//! presets; board and rack size are fixed at compile time
 //! ([`BOARD_SIZE`], [`RACK_SIZE`]).
 //!
 //! Rules live for the whole program (`&'static`): use a preset, or leak a
@@ -24,6 +24,16 @@ pub enum Ending {
     /// more turn and the player who emptied it plays the last move.
     /// Unplayed tiles score nothing and going out earns no bonus.
     EqualTurn,
+    /// Scrabble: play continues after the bag empties until a player uses
+    /// their last tile, who then gains the value of the opponent's rack
+    /// while the opponent loses it; or until six turns in a row score
+    /// nothing, when each player loses the value of their own rack.
+    GoOut,
+}
+
+impl Ending {
+    /// Consecutive scoreless turns that end a [`Ending::GoOut`] game.
+    pub const SCORELESS_TURNS_TO_END: usize = 6;
 }
 
 /// The rules of a game.
@@ -217,6 +227,112 @@ pub static CROSSPLAY: Rules = Rules {
     ending: Ending::EqualTurn,
 };
 
+/// Standard (English-language) Scrabble's premium squares. The centre is a
+/// double word square.
+const fn scrabble_layout() -> [[Premium; BOARD_SIZE]; BOARD_SIZE] {
+    let layout = [[Premium::Normal; BOARD_SIZE]; BOARD_SIZE];
+    let layout = mark(
+        layout,
+        &[
+            (0, 0),
+            (0, 7),
+            (0, 14),
+            (7, 0),
+            (7, 14),
+            (14, 0),
+            (14, 7),
+            (14, 14),
+        ],
+        Premium::TripleWord,
+    );
+    let layout = mark(
+        layout,
+        &[
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (10, 10),
+            (11, 11),
+            (12, 12),
+            (13, 13),
+            (1, 13),
+            (2, 12),
+            (3, 11),
+            (4, 10),
+            (10, 4),
+            (11, 3),
+            (12, 2),
+            (13, 1),
+            (7, 7),
+        ],
+        Premium::DoubleWord,
+    );
+    let layout = mark(
+        layout,
+        &[
+            (1, 5),
+            (1, 9),
+            (5, 1),
+            (5, 5),
+            (5, 9),
+            (5, 13),
+            (9, 1),
+            (9, 5),
+            (9, 9),
+            (9, 13),
+            (13, 5),
+            (13, 9),
+        ],
+        Premium::TripleLetter,
+    );
+    mark(
+        layout,
+        &[
+            (0, 3),
+            (0, 11),
+            (2, 6),
+            (2, 8),
+            (3, 0),
+            (3, 7),
+            (3, 14),
+            (6, 2),
+            (6, 6),
+            (6, 8),
+            (6, 12),
+            (7, 3),
+            (7, 11),
+            (8, 2),
+            (8, 6),
+            (8, 8),
+            (8, 12),
+            (11, 0),
+            (11, 7),
+            (11, 14),
+            (12, 6),
+            (12, 8),
+            (14, 3),
+            (14, 11),
+        ],
+        Premium::DoubleLetter,
+    )
+}
+
+/// Standard English-language Scrabble: its board, values and 100 tiles, a
+/// 50-point bingo, and the go-out ending.
+#[rustfmt::skip] // keep the letter rulers lined up with the values
+pub static SCRABBLE: Rules = Rules {
+    name: "Scrabble",
+    premiums: scrabble_layout(),
+    start: (BOARD_SIZE / 2, BOARD_SIZE / 2),
+    //              A  B  C  D  E  F  G  H  I  J  K  L  M  N  O  P  Q   R  S  T  U  V  W  X  Y  Z
+    letter_values: [1, 3, 3, 2, 1, 4, 2, 4, 1, 8, 5, 1, 3, 1, 1, 3, 10, 1, 1, 1, 1, 4, 4, 8, 4, 10],
+    //             A  B  C  D  E   F  G  H  I  J  K  L  M  N  O  P  Q  R  S  T  U  V  W  X  Y  Z  ?
+    distribution: [9, 2, 2, 4, 12, 2, 3, 2, 9, 1, 1, 4, 2, 6, 8, 2, 1, 6, 4, 6, 4, 2, 2, 1, 2, 1, 2],
+    bingo_bonus: 50,
+    ending: Ending::GoOut,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +441,44 @@ mod tests {
         // The table was fitted under a 50-point bonus, so PLAIN needs no
         // correction; Crossplay's 40 makes a bingo-prone leave worth less.
         assert!(dict.leave_value(&blank, None) > crossplay);
+    }
+
+    #[test]
+    fn scrabble_preset() {
+        let r = &SCRABBLE;
+        assert_eq!(r.total_tiles(), 100);
+        assert_eq!(r.blank_count(), 2);
+        assert_eq!(r.letter_value('K'), 5);
+        assert_eq!(r.letter_value('J'), 8);
+        let p = &r.premiums;
+        let count = |want: Premium| p.iter().flatten().filter(|&&q| q == want).count();
+        assert_eq!(count(Premium::TripleWord), 8);
+        assert_eq!(count(Premium::DoubleWord), 17);
+        assert_eq!(count(Premium::TripleLetter), 12);
+        assert_eq!(count(Premium::DoubleLetter), 24);
+        for r in 0..BOARD_SIZE {
+            for c in 0..BOARD_SIZE {
+                assert_eq!(p[r][c], p[c][r]);
+                assert_eq!(p[r][c], p[BOARD_SIZE - 1 - r][c]);
+            }
+        }
+        assert_eq!(p[7][7], Premium::DoubleWord);
+    }
+
+    /// The best opening bingo with seven 1-point tiles scores 66 in
+    /// Scrabble: doubled by the centre square, one letter on a double
+    /// letter square, plus 50.
+    #[test]
+    fn scrabble_scores_an_opening_bingo() {
+        let Some(dict) = crate::test_data::dictionary() else {
+            return;
+        };
+        let board = crate::board::Board::with_rules(&SCRABBLE);
+        let best = crate::solver::Solver::new(&board, &dict)
+            .best_move_by_score(&tiles("AEINRST"))
+            .unwrap();
+        assert!(best.is_bingo);
+        assert_eq!(best.score, 66, "{}", best.word);
     }
 
     #[test]

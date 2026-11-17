@@ -719,3 +719,84 @@ fn bounded_last_turn_matches_exhaustive_search() {
     }
     assert!(checked > 40, "only {checked} positions checked");
 }
+
+/// Under Scrabble's go-out ending, a player who plays out gains twice the
+/// value of the opponent's rack: we hook S for its score, then +2 x VV.
+#[test]
+fn scrabble_playouts_reward_going_out() {
+    use crate::rules::SCRABBLE;
+    let Some(dict) = crate::test_data::dictionary() else {
+        return;
+    };
+    let mut board = Board::with_rules(&SCRABBLE);
+    for (c, l) in [(6, 'C'), (7, 'A'), (8, 'T')] {
+        board.place_tile(7, c, Tile::new(l));
+    }
+    let ours = vec![Tile::new('S')];
+    let theirs = vec![Tile::new('V'), Tile::new('V')];
+    let best = Solver::new(&board, &dict).best_score(&ours) as f32;
+    assert!(best > 0.0);
+    let mut playout = Playout::new(&dict, board, [ours, theirs], Vec::new(), 1);
+    let outcome = playout.run_with(Player::Us, 4, &mut |_, _| {});
+    assert!(outcome.finished);
+    assert_eq!(outcome.value, best + 2.0 * 8.0);
+}
+
+/// Six scoreless turns in a row end a go-out game, each side losing its
+/// own rack's value. Neither VV nor QQ makes a word on an empty board:
+/// we lose 8, they lose 20.
+#[test]
+fn scrabble_playouts_end_after_six_scoreless_turns() {
+    use crate::rules::SCRABBLE;
+    let Some(dict) = crate::test_data::dictionary() else {
+        return;
+    };
+    let ours = vec![Tile::new('V'), Tile::new('V')];
+    let theirs = vec![Tile::new('Q'), Tile::new('Q')];
+    let mut playout = Playout::new(
+        &dict,
+        Board::with_rules(&SCRABBLE),
+        [ours, theirs],
+        Vec::new(),
+        1,
+    );
+    let outcome = playout.run_with(Player::Us, 4, &mut |_, _| {});
+    assert!(outcome.finished);
+    assert_eq!(outcome.value, -8.0 + 20.0);
+}
+
+/// A Scrabble simulation runs end to end: candidates near the end of the
+/// game are played out to the finish under the go-out rules.
+#[test]
+fn scrabble_simulation_runs() {
+    use crate::rules::SCRABBLE;
+    use crate::sim::{SimSettings, Simulation};
+    use std::sync::atomic::AtomicBool;
+    let Some(dict) = crate::test_data::dictionary() else {
+        return;
+    };
+    let dict = dict.for_rules(&SCRABBLE);
+    let mut state = SolverState::new();
+    state.board = Board::with_rules(&SCRABBLE);
+    // Rebuild the BEECH position on a Scrabble board.
+    let beech =
+        SolverState::from_cgp("15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15 AEINRST")
+            .unwrap();
+    for r in 0..crate::board::BOARD_SIZE {
+        for c in 0..crate::board::BOARD_SIZE {
+            if let Some(t) = beech.get_tile(r, c) {
+                state.place_tile(r, c, *t);
+            }
+        }
+    }
+    for c in "AEINRST".chars() {
+        state.add_to_rack(c);
+    }
+    let mut candidates = state.get_suggestions(&dict);
+    candidates.truncate(5);
+    let settings = SimSettings::for_bag(state.bag_size(), 8, None);
+    let snap = Simulation::new(settings, &dict, &state, &candidates, None, None)
+        .run(&AtomicBool::new(false), &mut |_| {});
+    assert!(snap.done);
+    assert!(snap.arms.iter().all(|a| a.n >= 8 && a.spread.is_finite()));
+}
