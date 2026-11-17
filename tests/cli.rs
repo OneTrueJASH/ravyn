@@ -102,7 +102,8 @@ fn endgame_uses_the_known_opponent_rack() {
 
 #[test]
 fn infer_reports_the_kept_letters() {
-    if common::dictionary().is_none() {
+    // The rack count depends on the leave values: skip without the table.
+    if common::dictionary_with_leaves().is_none() {
         return;
     }
     let out = stdout(&ravyn(&[
