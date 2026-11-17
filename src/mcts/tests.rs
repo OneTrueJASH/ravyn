@@ -70,7 +70,7 @@ fn opponent_model_biases_the_deal() {
 /// twice in a row.
 #[test]
 fn pass_is_a_playout_candidate_without_exchanges() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let tiles = |s: &str| -> Vec<Tile> {
@@ -115,7 +115,7 @@ fn pass_is_a_playout_candidate_without_exchanges() {
 /// prefers better moves; our own side stays exact.
 #[test]
 fn opponent_policy_errs_at_temperature() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let mut playout = Playout::new_game(&dict, 42);
@@ -167,7 +167,7 @@ fn opponent_policy_errs_at_temperature() {
 /// `evaluate` and `evaluate_with_model(None)` are the same computation.
 #[test]
 fn evaluate_without_model_is_unchanged() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let mut state = SolverState::new();
@@ -196,7 +196,7 @@ fn evaluate_without_model_is_unchanged() {
 
 #[test]
 fn test_mcts_evaluator_basic() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let state = SolverState::new();
@@ -239,7 +239,7 @@ fn test_mcts_evaluator_basic() {
 /// final turns rather than when a rack empties.
 #[test]
 fn test_playout_follows_equal_turn_rule() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let mut board = Board::new();
@@ -297,7 +297,7 @@ fn test_playout_follows_equal_turn_rule() {
 /// terminate with an empty bag and a finite value.
 #[test]
 fn test_pre_endgame_evaluation_terminates() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     // 87 tiles on the board and 4 in our rack: 9 unseen, bag of 2.
@@ -357,7 +357,7 @@ fn paired_difference_statistics() {
 /// their short-run means.
 #[test]
 fn fully_simulated_candidates_rank_first() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
@@ -391,7 +391,7 @@ fn fully_simulated_candidates_rank_first() {
 /// for every candidate.
 #[test]
 fn time_budget_is_honoured() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
@@ -421,7 +421,7 @@ fn time_budget_is_honoured() {
 #[ignore]
 fn bench_pre_endgame() {
     use std::time::Instant;
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
@@ -499,7 +499,7 @@ fn multiset(v: &[Tile]) -> Vec<(bool, char)> {
 /// never "emptied" by it.
 #[test]
 fn playout_exchange_conserves_tiles_and_bag_size() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let bag = tiles_of("EEEEEEEEEE");
@@ -539,7 +539,7 @@ fn playout_exchange_conserves_tiles_and_bag_size() {
 /// before the exchanged tiles went back).
 #[test]
 fn full_exchange_with_bag_of_seven_does_not_claim_final_turn() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let mut p = Playout::new(
@@ -560,7 +560,7 @@ fn full_exchange_with_bag_of_seven_does_not_claim_final_turn() {
 /// move for the other side and then the emptier's final move.
 #[test]
 fn playout_endings_follow_the_equal_turn_sequence() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let board = Board::new();
@@ -634,7 +634,7 @@ fn playout_endings_follow_the_equal_turn_sequence() {
 /// evaluator handles them alongside plays.
 #[test]
 fn exchange_candidates_evaluate() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let state =
@@ -679,7 +679,7 @@ fn exchange_candidates_evaluate() {
 /// unpruned 2-ply search, on many positions, racks with blanks included.
 #[test]
 fn bounded_last_turn_matches_exhaustive_search() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let exhaustive = |p: &Playout, who: Player| -> i32 {

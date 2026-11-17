@@ -90,7 +90,7 @@ fn fit_logistic(xs: &[Vec<f64>], ys: &[f64], iters: usize) -> Vec<f64> {
 #[test]
 #[ignore]
 fn study_spread_variance() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let games: usize = std::env::var("GAMES")
@@ -214,7 +214,7 @@ fn study_spread_variance() {
 #[test]
 #[ignore]
 fn study_win_model() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let games: u64 = std::env::var("GAMES")
@@ -428,7 +428,7 @@ fn study_win_model() {
 fn study_loss_calibration() {
     use crate::game::observed_move_loss;
 
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let games: usize = std::env::var("GAMES")
@@ -559,7 +559,7 @@ fn study_loss_calibration() {
 #[test]
 #[ignore]
 fn study_bingo_probability() {
-    let Some(dict) = crate::datafiles::test_data::dictionary() else {
+    let Some(dict) = crate::test_data::dictionary() else {
         return;
     };
     let games: usize = std::env::var("GAMES")

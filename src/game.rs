@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_get_suggestions() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
 
@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn exchange_moves_complete_and_distinct() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let rack = t("AABC??D");
@@ -803,7 +803,7 @@ mod tests {
 
     #[test]
     fn get_suggestions_exchanges_only_with_bag_of_seven() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         // MID board: 87 tiles; rack AEST -> unseen 9 -> bag 2: no exchanges.
@@ -846,7 +846,7 @@ mod tests {
     /// completions and thus the best alternatives are identical).
     #[test]
     fn observed_move_loss_ranks_worse_moves_higher() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let state =
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn apply_exchange_clears_exactly_those_tiles() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let mut s =

@@ -31,7 +31,6 @@ use rayon::prelude::*;
 
 use crate::board::Board;
 use crate::dictionary::Dictionary;
-use crate::logging::log;
 use crate::solver::{Move, Solver};
 use crate::tile::{Rack, Tile};
 
@@ -139,13 +138,13 @@ impl<'a> EndgameSolver<'a> {
         }
         let mut our_moves = solver.find_moves(&rack);
 
-        log(&format!(
+        log::info!(
             "Endgame solver: {} candidate moves, {} our tiles, {} opp tiles, final turn: {:?}",
             our_moves.len(),
             our_rack.len(),
             opponent_rack.len(),
             final_turn
-        ));
+        );
 
         let mut results: Vec<EndgameMove> = if !opponent_has_turn {
             // Our move ends the game: pure score maximization.
@@ -227,12 +226,9 @@ impl<'a> EndgameSolver<'a> {
                 .then(b.mv.score.cmp(&a.mv.score))
         });
 
-        log(&format!(
-            "Endgame solver complete: {} moves evaluated",
-            results.len()
-        ));
+        log::info!("Endgame solver complete: {} moves evaluated", results.len());
         if let Some(best) = results.first() {
-            log(&format!(
+            log::info!(
                 "Best: {} at {} score={} value={} (opp responds: {} for {})",
                 best.mv.word,
                 best.mv.coords(),
@@ -240,7 +236,7 @@ impl<'a> EndgameSolver<'a> {
                 best.endgame_value,
                 best.opponent_best_word,
                 best.opponent_best_score
-            ));
+            );
         }
 
         Some(results)
@@ -263,7 +259,7 @@ mod tests {
     #[test]
     fn test_last_move_pure_score() {
         // When opponent has no turn remaining, just maximize score
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = make_board_with_cat();
@@ -300,7 +296,7 @@ mod tests {
     #[test]
     fn test_two_ply_opponent_response() {
         // With opponent having a turn, we should consider their response
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = make_board_with_cat();
@@ -345,7 +341,7 @@ mod tests {
         // A lower-scoring move that blocks the opponent's best play
         // should rank higher than a higher-scoring move that leaves
         // the opponent a big scoring opportunity
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = make_board_with_cat();
@@ -392,7 +388,7 @@ mod tests {
     /// minus the opponent's best reply — recomputed here independently.
     #[test]
     fn test_pass_candidate_and_values_are_consistent() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = make_board_with_cat();

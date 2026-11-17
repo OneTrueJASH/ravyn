@@ -659,7 +659,7 @@ fn paired_difference(a: &[f32], b: &[f32]) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datafiles::test_data;
+    use crate::test_data;
 
     const BEECH: &str = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15";
     const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";

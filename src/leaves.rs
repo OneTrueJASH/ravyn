@@ -304,8 +304,7 @@ mod tests {
 
     #[test]
     fn loads_and_indexes_consistently() {
-        let Some(klv_path) = crate::datafiles::test_data::file(crate::datafiles::LEAVES_KLV2)
-        else {
+        let Some(klv_path) = crate::test_data::file(crate::test_data::LEAVES_KLV2) else {
             return;
         };
         let lv = LeaveValues::load(klv_path).expect("leave table parses");

@@ -17,7 +17,7 @@ use crate::game::TOTAL_TILES;
 use crate::tile::{letter_value, Rack, Tile, RACK_SIZE};
 
 /// Bonus points awarded when a player uses all tiles from their rack in a single turn.
-pub(crate) const BINGO_BONUS: u32 = 40;
+pub const BINGO_BONUS: u32 = 40;
 
 /// Bitmask with every letter A–Z allowed.
 const ALL_LETTERS: u32 = (1 << 26) - 1;
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[test]
     fn test_solver_first_turn() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = Board::new();
@@ -1461,7 +1461,7 @@ mod tests {
 
     #[test]
     fn test_solver_with_existing_tiles() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let mut board = Board::new();
@@ -1491,7 +1491,7 @@ mod tests {
 
     #[test]
     fn test_solver_extensions() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let mut board = Board::new();
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[test]
     fn test_cross_word_validation() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let mut board = Board::new();
@@ -1594,7 +1594,7 @@ mod tests {
     /// the solver to miss plays that needed the blank at a later position.
     #[test]
     fn test_blank_ordering_does_not_affect_play_set() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = Board::new(); // first turn
@@ -1642,7 +1642,7 @@ mod tests {
     /// Test that blank tiles enable plays with letters not in the rack.
     #[test]
     fn test_blank_enables_missing_letters() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = Board::new();
@@ -1679,7 +1679,7 @@ mod tests {
     /// Test blank plays on a populated board with cross-check constraints.
     #[test]
     fn test_blank_with_cross_checks() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let mut board = Board::new();
@@ -1738,7 +1738,7 @@ mod tests {
     /// scores most (the blank is worth 0 regardless of premium).
     #[test]
     fn test_blank_goes_on_cheaper_square() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = Board::new();
@@ -1815,7 +1815,7 @@ mod tests {
     /// scorer used for opponent moves.
     #[test]
     fn test_incremental_score_matches_standalone() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let mut board = Board::new();
@@ -1855,7 +1855,7 @@ mod tests {
     /// Each distinct tile placement must appear exactly once.
     #[test]
     fn test_no_duplicate_placements() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let mut board = Board::new();
@@ -1904,7 +1904,7 @@ mod tests {
 
     #[test]
     fn test_bingo_bonus_and_leave() {
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         let board = Board::new();
@@ -1942,7 +1942,7 @@ mod tests {
     #[test]
     fn best_move_searches_match_the_full_list() {
         use crate::game::{best_exchange, exchange_moves, top_exchanges, SolverState};
-        let Some(dict) = crate::datafiles::test_data::dictionary() else {
+        let Some(dict) = crate::test_data::dictionary() else {
             return;
         };
         const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
