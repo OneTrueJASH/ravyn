@@ -309,6 +309,72 @@ fn dir_index(dir: Direction) -> usize {
     }
 }
 
+/// Where a play goes and what it spells, as a total order for breaking
+/// ties between plays of equal equity and score: the longer word first,
+/// then the smaller key. Searches that keep only the best plays use it, so
+/// their answer does not depend on the order anchors are searched in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PlayKey {
+    dir: u8,
+    row: u8,
+    col: u8,
+    /// Letters 1-26, zero-padded.
+    word: [u8; BOARD_SIZE],
+    /// Bit `i` set when the `i`th placed tile is a blank.
+    blanks: u8,
+}
+
+impl PlayKey {
+    fn of_move(m: &Move) -> Self {
+        let mut word = [0u8; BOARD_SIZE];
+        for (w, b) in word.iter_mut().zip(m.word.bytes()) {
+            *w = b.wrapping_sub(b'A') + 1;
+        }
+        PlayKey {
+            dir: dir_index(m.direction) as u8,
+            row: m.row as u8,
+            col: m.col as u8,
+            word,
+            blanks: m
+                .tiles_used
+                .iter()
+                .enumerate()
+                .fold(0, |b, (i, (_, _, t))| b | (t.is_blank as u8) << i),
+        }
+    }
+}
+
+/// The canonical order among plays of equal equity: higher score, then
+/// the longer word (as single-tile plays are labelled), then the smaller
+/// [`PlayKey`]. `Less` means `a` comes first.
+fn tie_order(a: (u32, usize, PlayKey), b: (u32, usize, PlayKey)) -> std::cmp::Ordering {
+    b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2))
+}
+
+/// An equity for sorting, in `f32::total_cmp` order.
+#[derive(Debug, Clone, Copy)]
+struct OrderedEquity(f32);
+
+impl PartialEq for OrderedEquity {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for OrderedEquity {}
+
+impl PartialOrd for OrderedEquity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedEquity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
 /// A tile placed during generation: position along the lane, letter index,
 /// and whether it came from a blank.
 #[derive(Clone, Copy)]
@@ -465,7 +531,31 @@ impl Snapshot {
     /// score (the order `find_moves` sorts by).
     #[inline]
     fn beats_by_equity(&self, other: &Snapshot) -> bool {
-        self.equity > other.equity || (self.equity == other.equity && self.score > other.score)
+        self.equity > other.equity || (self.equity == other.equity && self.ties_first(other))
+    }
+
+    /// The canonical tie order ([`tie_order`]): true if `self` comes first.
+    fn ties_first(&self, other: &Snapshot) -> bool {
+        tie_order(self.tie_rank(), other.tie_rank()) == std::cmp::Ordering::Less
+    }
+
+    fn tie_rank(&self) -> (u32, usize, PlayKey) {
+        let (row, col) = self.rc(self.word_start);
+        let mut word = [0u8; BOARD_SIZE];
+        for (w, &l) in word.iter_mut().zip(&self.word[..self.word_len]) {
+            *w = l + 1;
+        }
+        let key = PlayKey {
+            dir: dir_index(self.dir) as u8,
+            row: row as u8,
+            col: col as u8,
+            word,
+            blanks: self.placed[..self.n]
+                .iter()
+                .enumerate()
+                .fold(0, |b, (i, p)| b | (p.is_blank as u8) << i),
+        };
+        (self.score, self.word_len, key)
     }
 
     /// The single square and tile of a one-tile play.
@@ -491,6 +581,16 @@ enum Sink {
     /// Whether any play's equity exceeds `threshold`; the search stops at
     /// the first that does.
     Beats { threshold: f32, found: bool },
+}
+
+/// Rack facts the anchor bounds use (see [`Gen::bound_inputs`]).
+struct BoundInputs {
+    /// Tile values, highest first (blanks 0; zero-padded).
+    values: [u32; RACK_SIZE],
+    /// Best leave value keeping each number of tiles.
+    best_leave: [f32; RACK_SIZE + 1],
+    /// False for the score-only search, which ignores leaves.
+    by_equity: bool,
 }
 
 /// Mutable search state for one `find_moves` call.
@@ -549,12 +649,15 @@ impl<'a> Solver<'a> {
         Self::dedup_single_tile_plays(&mut moves);
 
         // Sort by equity descending (strategic value = score + leave value),
-        // breaking ties by raw score so the order is stable across runs.
-        moves.sort_by(|a, b| {
-            b.equity
-                .partial_cmp(&a.equity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.score.cmp(&a.score))
+        // then in the canonical tie order, so the list's first play is the
+        // one the best-move searches return.
+        moves.sort_by_cached_key(|m| {
+            (
+                std::cmp::Reverse(OrderedEquity(m.equity)),
+                std::cmp::Reverse(m.score),
+                std::cmp::Reverse(m.word.len()),
+                PlayKey::of_move(m),
+            )
         });
 
         moves
@@ -739,28 +842,45 @@ impl<'a> Solver<'a> {
             &[Direction::Horizontal, Direction::Vertical]
         };
 
-        for (row, anchors) in info.anchor.iter().enumerate() {
-            for (col, &is_anchor) in anchors.iter().enumerate() {
-                if !is_anchor {
-                    continue;
+        let anchors = info.anchor.iter().enumerate().flat_map(|(row, anchors)| {
+            anchors
+                .iter()
+                .enumerate()
+                .filter(|&(_, &a)| a)
+                .flat_map(move |(col, _)| directions.iter().map(move |&dir| (row, col, dir)))
+        });
+
+        if matches!(gen.sink, Sink::All(_) | Sink::Beats { .. }) {
+            // Every play is wanted, or any one good enough: bounding every
+            // anchor first (and every leave) would cost more than it saves.
+            // `Beats` stops at its first play above the threshold.
+            for (row, col, dir) in anchors {
+                if gen.abort {
+                    break;
                 }
-                for &dir in directions {
-                    if gen.abort {
-                        return gen.sink;
-                    }
-                    gen.dir = dir;
-                    gen.di = dir_index(dir);
-                    let (lane, pos) = match dir {
-                        Direction::Horizontal => (row, col),
-                        Direction::Vertical => (col, row),
-                    };
-                    gen.lane = lane;
-                    gen.anchor_pos = pos;
-                    gen.generate_at_anchor();
-                }
+                gen.set_anchor(row, col, dir);
+                gen.generate_at_anchor();
             }
+            return gen.sink;
         }
 
+        // Only the best plays are wanted: search anchors from the highest
+        // bound down and stop once no remaining anchor can matter.
+        let bounds = gen.bound_inputs(tiles);
+        let mut order: Vec<(f32, usize, usize, Direction)> = anchors
+            .map(|(row, col, dir)| {
+                gen.set_anchor(row, col, dir);
+                (gen.anchor_bound(&bounds), row, col, dir)
+            })
+            .collect();
+        order.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (bound, row, col, dir) in order {
+            if gen.abort || gen.out_of_reach(bound) {
+                break;
+            }
+            gen.set_anchor(row, col, dir);
+            gen.generate_at_anchor();
+        }
         gen.sink
     }
 
@@ -1028,7 +1148,8 @@ impl<'a> Solver<'a> {
             let key = (r, c, t.letter, t.is_blank);
             match best.get(&key) {
                 Some(&j) => {
-                    if moves[j].word.len() >= mv.word.len() {
+                    let rank = |m: &Move| (m.score, m.word.len(), PlayKey::of_move(m));
+                    if tie_order(rank(&moves[j]), rank(mv)) != std::cmp::Ordering::Greater {
                         keep[i] = false;
                     } else {
                         keep[j] = false;
@@ -1064,6 +1185,188 @@ impl<'s, 'a> Gen<'s, 'a> {
     fn tile_at(&self, pos: usize) -> Option<&'a Tile> {
         let (r, c) = self.rc(pos);
         self.solver.board.get_tile(r, c)
+    }
+
+    /// Search from the anchor at (row, col) in direction `dir` next.
+    fn set_anchor(&mut self, row: usize, col: usize, dir: Direction) {
+        self.dir = dir;
+        self.di = dir_index(dir);
+        let (lane, pos) = match dir {
+            Direction::Horizontal => (row, col),
+            Direction::Vertical => (col, row),
+        };
+        self.lane = lane;
+        self.anchor_pos = pos;
+    }
+
+    /// What the anchor bounds need from the rack: its tile values, highest
+    /// first, and for equity searches the best leave value of each size.
+    fn bound_inputs(&mut self, tiles: &[Tile]) -> BoundInputs {
+        let rules = self.solver.rules;
+        let mut values = [0u32; RACK_SIZE];
+        for (v, t) in values.iter_mut().zip(tiles) {
+            *v = rules.tile_value(t);
+        }
+        values[..tiles.len()].sort_unstable_by(|a, b| b.cmp(a));
+        let mut best_leave = [f32::NEG_INFINITY; RACK_SIZE + 1];
+        let by_equity = !matches!(self.sink, Sink::BestScore(_));
+        if by_equity {
+            for index in 0..=self.leaves.full_index() {
+                let size: usize = self
+                    .leaves
+                    .subset_counts(index)
+                    .iter()
+                    .map(|&n| n as usize)
+                    .sum();
+                let v = self.leaves.value(index);
+                if v > best_leave[size] {
+                    best_leave[size] = v;
+                }
+            }
+        }
+        BoundInputs {
+            values,
+            best_leave,
+            by_equity,
+        }
+    }
+
+    /// Upper bound on what any play from the current anchor is worth to
+    /// the sink: its score, plus for equity the best leave it could keep.
+    /// Ignores the dictionary and which letters the cross-checks allow
+    /// (beyond needing one the rack can supply), and puts the rack's most
+    /// valuable tiles on the squares that multiply them most.
+    fn anchor_bound(&self, inputs: &BoundInputs) -> f32 {
+        let scores = self.anchor_score_bounds(&inputs.values);
+        let mut bound = f32::NEG_INFINITY;
+        for (n, &score) in scores.iter().enumerate().skip(1) {
+            let Some(score) = score else {
+                continue;
+            };
+            let value = if inputs.by_equity {
+                score as f32 + inputs.best_leave[self.rack_len - n]
+            } else {
+                score as f32
+            };
+            if value > bound {
+                bound = value;
+            }
+        }
+        bound
+    }
+
+    /// For each number of tiles placed (index 1-7), an upper bound on the
+    /// score of the current anchor's plays that place that many, or `None`
+    /// if none can.
+    fn anchor_score_bounds(&self, values: &[u32; RACK_SIZE]) -> [Option<u32>; RACK_SIZE + 1] {
+        let rules = self.solver.rules;
+        let anchor = self.anchor_pos;
+        let playable = if self.rack[BLANK_IDX] > 0 {
+            ALL_LETTERS
+        } else {
+            (0..BLANK_IDX)
+                .filter(|&i| self.rack[i] > 0)
+                .fold(0, |m, i| m | 1 << i)
+        };
+        let mut best = [None; RACK_SIZE + 1];
+
+        // Tiles just before the anchor are a fixed start; otherwise up to
+        // `limit` tiles may be placed on the empty squares before it.
+        let mut prefix_sum = 0;
+        let mut limit = 0;
+        if anchor > 0 && self.tile_at(anchor - 1).is_some() {
+            let mut pos = anchor;
+            while pos > 0 {
+                match self.tile_at(pos - 1) {
+                    Some(t) => prefix_sum += rules.tile_value(t),
+                    None => break,
+                }
+                pos -= 1;
+            }
+        } else {
+            let mut pos = anchor;
+            while pos > 0 {
+                pos -= 1;
+                let (r, c) = self.rc(pos);
+                if self.tile_at(pos).is_some() || self.info.anchor[r][c] {
+                    break;
+                }
+                limit += 1;
+            }
+            limit = limit.min(self.rack_len.saturating_sub(1));
+        }
+
+        for left in 0..=limit {
+            // Placed squares: letter multiplier, and the factor each one's
+            // value is counted with besides the main word's multiplier.
+            let mut lm = [0u32; RACK_SIZE];
+            let mut cross_wm = [0u32; RACK_SIZE];
+            let mut n = 0;
+            let mut word_mult = 1;
+            let mut fixed = prefix_sum;
+            let mut cross_fixed = 0;
+            for pos in anchor - left..anchor {
+                let (r, c) = self.rc(pos);
+                let p = self.solver.premium_at(r, c);
+                lm[n] = p.letter_multiplier();
+                cross_wm[n] = 0;
+                word_mult *= p.word_multiplier();
+                n += 1;
+            }
+            for pos in anchor..BOARD_SIZE {
+                if let Some(t) = self.tile_at(pos) {
+                    fixed += rules.tile_value(t);
+                } else {
+                    if n == self.rack_len {
+                        break;
+                    }
+                    let (r, c) = self.rc(pos);
+                    if self.info.cross_mask[self.di][r][c] & playable == 0 {
+                        break;
+                    }
+                    let p = self.solver.premium_at(r, c);
+                    let wm = p.word_multiplier();
+                    lm[n] = p.letter_multiplier();
+                    if self.info.cross_has[self.di][r][c] {
+                        cross_wm[n] = wm;
+                        cross_fixed += self.info.cross_score[self.di][r][c] * wm;
+                    } else {
+                        cross_wm[n] = 0;
+                    }
+                    word_mult *= wm;
+                    n += 1;
+                }
+                // Each placed value counts word_mult * lm in the main word
+                // and lm * wm in its cross word: pair the largest factors
+                // with the largest values.
+                let mut factors = [0u32; RACK_SIZE];
+                for i in 0..n {
+                    factors[i] = lm[i] * (word_mult + cross_wm[i]);
+                }
+                factors[..n].sort_unstable_by(|a, b| b.cmp(a));
+                let placed: u32 = factors[..n].iter().zip(values).map(|(f, v)| f * v).sum();
+                let mut score = word_mult * fixed + cross_fixed + placed;
+                if n == RACK_SIZE {
+                    score += rules.bingo_bonus;
+                }
+                if best[n].is_none_or(|b| score > b) {
+                    best[n] = Some(score);
+                }
+            }
+        }
+        best
+    }
+
+    /// True when no play worth at most `bound` can change the sink's
+    /// answer (anchors are searched by falling bound, so none after it
+    /// can either).
+    fn out_of_reach(&self, bound: f32) -> bool {
+        match &self.sink {
+            Sink::BestScore(Some(best)) => bound < best.score as f32,
+            Sink::BestEquity(Some(best)) => bound < best.equity,
+            Sink::TopEquity { k, kept } if kept.len() == *k => bound < kept[k - 1].equity,
+            _ => false,
+        }
     }
 
     fn generate_at_anchor(&mut self) {
@@ -1341,7 +1644,8 @@ impl<'s, 'a> Gen<'s, 'a> {
 
         match &mut self.sink {
             Sink::BestScore(best) => {
-                if best.is_none_or(|b| score > b.score) {
+                if best.is_none_or(|b| score > b.score || (score == b.score && snap.ties_first(&b)))
+                {
                     *best = Some(snap);
                 }
                 return;
@@ -1370,7 +1674,7 @@ impl<'s, 'a> Gen<'s, 'a> {
                 // as `find_moves` does.
                 if let Some(key) = snap.single_tile_key() {
                     if let Some(i) = kept.iter().position(|o| o.single_tile_key() == Some(key)) {
-                        if kept[i].word_len >= snap.word_len {
+                        if !snap.beats_by_equity(&kept[i]) {
                             return;
                         }
                         kept.remove(i);
@@ -1987,6 +2291,90 @@ mod tests {
     /// The best-move searches must agree with the full move list: the same
     /// best play by equity, the same best score, and the same top-k plays
     /// in the same order. Exchanges likewise against `exchange_moves`.
+    /// The pruned searches return exactly what the full list says, on
+    /// many random racks: the best play (same tiles, same tie choice), the
+    /// top k in order, the best score, and whether any play beats a
+    /// threshold. Guards the anchor bounds: a bound too low would drop a
+    /// play.
+    #[test]
+    fn pruned_searches_agree_with_the_full_list_on_random_racks() {
+        use crate::game::SolverState;
+        let Some(dict) = crate::test_data::dictionary() else {
+            return;
+        };
+        const MID: &str = "14U/5HELM3ZIN/4VIG7T/6AYES3BI/6DOWER2AL/9GOOFS1/1BRA4GOWN1I1/POETIC1QI2L1N1/OX3H1U3Y3/R3FINAlS5/T4V1K1P5/A4e1EME5/L6DON5/EtHER3AD5/D2RECOAT6";
+        const BEECH: &str = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15";
+        const END: &str = "3N3Q3M3/3OP2UNTEACH1/3BE2O3N3/3LA2T2MYOPE/2FeR2H1LO4/2O6AB4/2R1F4U3De/2TRIVET1D3AY/4LA1A1IODIZE/4KI1JINX2ES/5R1E1G4O/OUTIES1S3G2R/11L2E/8WAHINES/2EGAlITE2A3";
+        const EMPTY: &str = "15/15/15/15/15/15/15/15/15/15/15/15/15/15/15";
+        let mut rng = fastrand::Rng::with_seed(7);
+        for board in [MID, BEECH, END, EMPTY] {
+            let base = SolverState::from_cgp(&format!("{board} A")).unwrap();
+            let mut unseen: Vec<(char, u32)> = base.unseen_tiles().into_iter().collect();
+            unseen.sort();
+            let pool: Vec<Tile> = unseen
+                .iter()
+                .flat_map(|&(c, n)| {
+                    (0..n).map(move |_| {
+                        if c == '?' {
+                            Tile::blank(' ')
+                        } else {
+                            Tile::new(c)
+                        }
+                    })
+                })
+                .collect();
+            for _ in 0..40 {
+                let mut tiles = pool.clone();
+                rng.shuffle(&mut tiles);
+                tiles.truncate(rng.usize(1..=RACK_SIZE.min(tiles.len())));
+                let solver = Solver::new(&base.board, &dict);
+                let all = solver.find_moves_for(&tiles);
+                let label = format!(
+                    "{} / {}",
+                    &board[..10],
+                    tiles
+                        .iter()
+                        .map(|t| if t.is_blank { '?' } else { t.letter })
+                        .collect::<String>()
+                );
+                let best = solver.best_move_by_equity(&tiles);
+                assert_eq!(
+                    best.as_ref().map(tiles_key),
+                    all.first().map(tiles_key),
+                    "{label}"
+                );
+                assert_eq!(
+                    solver.best_score(&tiles),
+                    all.iter().map(|m| m.score).max().unwrap_or(0),
+                    "{label}"
+                );
+                for k in [1, 5, 16] {
+                    let top: Vec<_> = solver
+                        .top_moves_by_equity(&tiles, k)
+                        .iter()
+                        .map(tiles_key)
+                        .collect();
+                    let want: Vec<_> = all.iter().take(k).map(tiles_key).collect();
+                    assert_eq!(top, want, "{label} k={k}");
+                }
+                if let Some(first) = all.first() {
+                    for t in [
+                        first.equity - 0.5,
+                        first.equity,
+                        first.equity + 0.5,
+                        first.equity - 20.0,
+                    ] {
+                        assert_eq!(
+                            solver.any_play_beats(&tiles, t),
+                            all.iter().any(|m| m.equity > t),
+                            "{label} threshold {t}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn best_move_searches_match_the_full_list() {
         use crate::game::{best_exchange, exchange_moves, top_exchanges, SolverState};
