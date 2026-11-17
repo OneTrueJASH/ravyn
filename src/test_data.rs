@@ -13,9 +13,15 @@ pub const WORDS_FST: &str = "data/words.fst";
 /// The leave table, relative to the data root.
 pub const LEAVES: &str = "data/leaves.rlv";
 
-/// The data root: the workspace root, two levels above this crate.
+/// The data root: this crate's directory when it holds `data/` (the
+/// standalone repository), else the workspace root two levels up.
 pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if here.join("data").is_dir() {
+        here.to_path_buf()
+    } else {
+        here.join("../..")
+    }
 }
 
 /// True when `path` is a Git LFS pointer stub (a tiny text file starting

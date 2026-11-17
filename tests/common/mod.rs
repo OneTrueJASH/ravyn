@@ -9,9 +9,15 @@ use std::path::{Path, PathBuf};
 use ravyn::dictionary::Dictionary;
 use ravyn::leaves::LeaveValues;
 
-/// The workspace root, two levels above this crate.
+/// The data root: this crate's directory when it holds `data/` (the
+/// standalone repository), else the workspace root two levels up.
 pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if here.join("data").is_dir() {
+        here.to_path_buf()
+    } else {
+        here.join("../..")
+    }
 }
 
 /// True for a real data file: present and not a Git LFS pointer stub.

@@ -25,7 +25,13 @@ const BEECH: &str = "15/15/15/15/15/15/15/3BEECH7/7I7/7K7/7E7/7r7/15/15/15";
 const END: &str = "3N3Q3M3/3OP2UNTEACH1/3BE2O3N3/3LA2T2MYOPE/2FeR2H1LO4/2O6AB4/2R1F4U3De/2TRIVET1D3AY/4LA1A1IODIZE/4KI1JINX2ES/5R1E1G4O/OUTIES1S3G2R/11L2E/8WAHINES/2EGAlITE2A3";
 
 fn dictionary() -> Dictionary {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // The standalone repository holds data/; in a workspace it is two up.
+    let root = if here.join("data").is_dir() {
+        here.to_path_buf()
+    } else {
+        here.join("../..")
+    };
     let dict = Dictionary::load_from_fst(root.join("data/words.fst")).expect("dictionary");
     match LeaveValues::load(root.join("data/leaves.rlv")) {
         Ok(table) => dict.with_leaves(table),
