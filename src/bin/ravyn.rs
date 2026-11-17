@@ -16,7 +16,7 @@ use ravyn::game::SolverState;
 use ravyn::inference::{infer_leave, InferenceSettings};
 use ravyn::leavegen::{train_generation, TrainingSettings};
 use ravyn::leaves::LeaveValues;
-use ravyn::mcts::{self_play_match, MatchEngine};
+use ravyn::mcts::{self_play_match, MatchEngine, SimChoice};
 use ravyn::negamax::{solve_go_out, GoOutSettings};
 use ravyn::preendgame::solve_one_in_bag;
 use ravyn::rules::{Ending, Rules, CROSSPLAY, SCRABBLE};
@@ -46,7 +46,9 @@ commands:
               (default leaves.rlv) after every generation
   match       self-play match between two leave tables (--a, --b: a
               leave table file, or `none` for the heuristic): A's score and
-              mean spread over --pairs paired games (default 1000)
+              mean spread over --pairs paired games (default 1000);
+              --sim C,P makes both sides choose each move by simulating
+              their top C candidates P playouts each
 
 options:
   --rules NAME    `crossplay` (default) or `scrabble`
@@ -114,6 +116,8 @@ struct Options {
     a: Option<String>,
     b: Option<String>,
     pairs: usize,
+    /// match: both sides choose moves by simulation (candidates, playouts).
+    sim: Option<SimChoice>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -137,6 +141,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         a: None,
         b: None,
         pairs: 1000,
+        sim: None,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -167,6 +172,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--out" => o.out = PathBuf::from(value("--out")?),
             "--from" => o.from = Some(PathBuf::from(value("--from")?)),
             "--a" => o.a = Some(value("--a")?),
+            "--sim" => {
+                let v = value("--sim")?;
+                let (c, p) = v
+                    .split_once(',')
+                    .ok_or_else(|| format!("--sim: CANDIDATES,PLAYOUTS, not {v}"))?;
+                o.sim = Some(SimChoice {
+                    candidates: number("--sim", c.to_string())? as usize,
+                    playouts: number("--sim", p.to_string())? as usize,
+                });
+            }
             "--b" => o.b = Some(value("--b")?),
             "--rules" => {
                 o.rules = match value("--rules")?.to_ascii_lowercase().as_str() {
@@ -656,7 +671,7 @@ fn leave_match(o: &Options) -> Result<(), String> {
         name,
         dict,
         allow_pass: true,
-        sim: None,
+        sim: o.sim,
     };
     let started = std::time::Instant::now();
     let r = self_play_match(&engine(a, &da), &engine(b, &db), o.pairs.max(1), o.seed);
