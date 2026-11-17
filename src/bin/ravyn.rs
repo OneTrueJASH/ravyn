@@ -15,28 +15,33 @@ use ravyn::endgame::{EndgameSolver, FinalTurn};
 use ravyn::game::SolverState;
 use ravyn::inference::{infer_leave, InferenceSettings};
 use ravyn::leaves::LeaveValues;
+use ravyn::negamax::{solve_go_out, GoOutSettings};
 use ravyn::preendgame::solve_one_in_bag;
+use ravyn::rules::{Ending, Rules, CROSSPLAY, SCRABBLE};
 use ravyn::sim::{ArmStatus, SimSettings, Simulation};
 use ravyn::solver::{Move, MoveKind};
 use ravyn::tile::{Tile, RACK_SIZE};
 
 const USAGE: &str = "\
-ravyn: the RAVYN crossword-game engine (Crossplay rules)
+ravyn: the RAVYN crossword-game engine
 
 usage: ravyn <command> '<CGP>' [options]
 
 commands:
   gen         every play, exchange and pass, best static equity first
   sim         simulate the best candidates; rank by mean final spread
-  endgame     bag empty: exact search (our play, their reply, our last)
+  endgame     bag empty: exact search (Crossplay: our play, their reply,
+              our last; Scrabble: negamax to the end, --seconds budget)
   preendgame  one tile in the bag: exact over every possible last tile
+              (Crossplay)
   infer       what the opponent kept: CGP is the board BEFORE their play,
               with OUR rack; needs --played and --score
 
 options:
+  --rules NAME    `crossplay` (default) or `scrabble`
   --top N         rows to print (default 20)
   --candidates N  sim: candidates to simulate (default 30)
-  --seconds S     sim: time budget (default 10)
+  --seconds S     sim and Scrabble endgame: time budget (default 10)
   --last WHO      endgame: who plays the final move, `them` (default:
                   they emptied the bag) or `us`
   --played TILES  infer: the tiles they played, `?` for a blank
@@ -76,6 +81,7 @@ struct Options {
     played: Option<String>,
     score: Option<u32>,
     data: Option<PathBuf>,
+    rules: &'static Rules,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -90,6 +96,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         played: None,
         score: None,
         data: None,
+        rules: &CROSSPLAY,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -111,6 +118,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--score" => o.score = Some(number("--score", value("--score")?)? as u32),
             "--played" => o.played = Some(value("--played")?),
             "--data" => o.data = Some(PathBuf::from(value("--data")?)),
+            "--rules" => {
+                o.rules = match value("--rules")?.to_ascii_lowercase().as_str() {
+                    "crossplay" => &CROSSPLAY,
+                    "scrabble" => &SCRABBLE,
+                    other => {
+                        return Err(format!("--rules: `crossplay` or `scrabble`, not {other}"))
+                    }
+                }
+            }
             "--last" => {
                 o.last = match value("--last")?.as_str() {
                     "them" => FinalTurn::Opponent,
@@ -209,8 +225,8 @@ fn load_dictionary(dir: Option<&Path>) -> Result<Dictionary, String> {
 
 fn run(args: &[String]) -> Result<(), String> {
     let o = parse(args)?;
-    let state = SolverState::from_cgp(&o.cgp)?;
-    let dict = load_dictionary(o.data.as_deref())?;
+    let state = SolverState::from_cgp_with_rules(&o.cgp, o.rules)?;
+    let dict = load_dictionary(o.data.as_deref())?.for_rules(o.rules);
     match o.command.as_str() {
         "gen" => gen(&o, &state, &dict),
         "sim" => sim(&o, &state, &dict),
@@ -343,6 +359,9 @@ fn endgame(o: &Options, state: &SolverState, dict: &Dictionary) -> Result<(), St
         ));
     }
     let theirs = opponent_rack(&o.cgp).unwrap_or_else(|| unseen(state));
+    if o.rules.ending == Ending::GoOut {
+        return go_out_endgame(o, state, dict, &theirs);
+    }
     let results =
         EndgameSolver::new(dict).solve(&state.board, &state.rack.tiles(), &theirs, o.last);
     let diff = score_diff(&o.cgp);
@@ -368,7 +387,62 @@ fn endgame(o: &Options, state: &SolverState, dict: &Dictionary) -> Result<(), St
     Ok(())
 }
 
+/// The Scrabble endgame: negamax to the end of the game.
+fn go_out_endgame(
+    o: &Options,
+    state: &SolverState,
+    dict: &Dictionary,
+    theirs: &[Tile],
+) -> Result<(), String> {
+    let settings = GoOutSettings {
+        budget: Some(Duration::from_secs(o.seconds.max(1))),
+        ..GoOutSettings::default()
+    };
+    let result = solve_go_out(
+        &state.board,
+        dict,
+        &state.rack.tiles(),
+        theirs,
+        &settings,
+        None,
+    )
+    .ok_or("no depth finished within the time budget")?;
+    println!(
+        "{}: depth {}, {} positions; value = spread change to the end of the game",
+        if result.solved {
+            "solved exactly"
+        } else {
+            "best estimate (not solved within the budget)"
+        },
+        result.depth,
+        result.nodes
+    );
+    let diff = score_diff(&o.cgp);
+    println!(
+        "{:<24} {:>5} {:>8} {:>7}",
+        "move", "score", "value", "final"
+    );
+    for line in result.lines.iter().take(o.top) {
+        let value = if line.exact {
+            format!("{:+}", line.value)
+        } else {
+            format!("<={:+}", line.value)
+        };
+        println!(
+            "{:<24} {:>5} {:>8} {:>+7}",
+            label(&line.mv),
+            line.mv.score,
+            value,
+            diff + line.value
+        );
+    }
+    Ok(())
+}
+
 fn preendgame(o: &Options, state: &SolverState, dict: &Dictionary) -> Result<(), String> {
+    if o.rules.ending != Ending::EqualTurn {
+        return Err("preendgame needs Crossplay's equal-turn ending".into());
+    }
     let unseen = unseen(state);
     if unseen.len() != RACK_SIZE + 1 {
         return Err(format!(

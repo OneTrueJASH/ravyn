@@ -164,3 +164,61 @@ fn preendgame_solves_one_tile_in_the_bag() {
     );
     assert!(out.lines().count() >= 3, "{out}");
 }
+
+/// Under Scrabble rules, `endgame` runs the negamax search to the end of a
+/// self-played game and reports whether it solved it.
+#[test]
+fn scrabble_endgame_is_searched_to_the_end() {
+    use ravyn::rules::SCRABBLE;
+    let Some(dict) = common::dictionary() else {
+        return;
+    };
+    let dict = dict.for_rules(&SCRABBLE);
+    // Greedy self-play until the bag empties, with small final racks.
+    let cgp = (0..100u64)
+        .find_map(|seed| {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut bag = SCRABBLE.full_tile_set();
+            rng.shuffle(&mut bag);
+            let mut racks = [
+                bag.split_off(bag.len() - RACK_SIZE),
+                bag.split_off(bag.len() - RACK_SIZE),
+            ];
+            let mut state = SolverState::new();
+            state.board = ravyn::board::Board::with_rules(&SCRABBLE);
+            let mut to_move = 0;
+            while !bag.is_empty() {
+                let mv = Solver::new(&state.board, &dict).best_move_by_equity(&racks[to_move])?;
+                for (r, c, t) in &mv.tiles_used {
+                    state.place_tile(*r, *c, *t);
+                }
+                for t in mv.tiles_from_rack() {
+                    let i = racks[to_move].iter().position(|x: &Tile| {
+                        x.is_blank == t.is_blank && (t.is_blank || x.letter == t.letter)
+                    })?;
+                    racks[to_move].swap_remove(i);
+                }
+                let draw = mv.tiles_used.len().min(bag.len());
+                racks[to_move].extend(bag.split_off(bag.len() - draw));
+                to_move = 1 - to_move;
+            }
+            (racks[1 - to_move].len() <= 3).then(|| {
+                for t in &racks[to_move] {
+                    state.add_to_rack(if t.is_blank { '?' } else { t.letter });
+                }
+                state.to_cgp((0, 0))
+            })
+        })
+        .expect("a self-played endgame with a short opponent rack");
+    let out = stdout(&ravyn(&[
+        "endgame",
+        &cgp,
+        "--rules",
+        "scrabble",
+        "--seconds",
+        "20",
+        "--top",
+        "3",
+    ]));
+    assert!(out.starts_with("solved exactly"), "{out}");
+}

@@ -370,11 +370,20 @@ impl SolverState {
     /// letters are blanks designated as that letter. Only the board and our
     /// rack are read; anything after them is ignored.
     pub fn from_cgp(cgp: &str) -> Result<Self, String> {
+        Self::from_cgp_with_rules(cgp, &crate::rules::CROSSPLAY)
+    }
+
+    /// [`Self::from_cgp`] for a game played under `rules`.
+    pub fn from_cgp_with_rules(
+        cgp: &str,
+        rules: &'static crate::rules::Rules,
+    ) -> Result<Self, String> {
         let mut sections = cgp.split_whitespace();
         let board_str = sections.next().ok_or("empty CGP")?;
         let rack_str = sections.next().unwrap_or("");
 
         let mut state = SolverState::new();
+        state.board = Board::with_rules(rules);
         let rows: Vec<&str> = board_str.split('/').collect();
         if rows.len() != BOARD_SIZE {
             return Err(format!("expected {} rows, got {}", BOARD_SIZE, rows.len()));
