@@ -272,6 +272,49 @@ fn index_letter(idx: usize) -> char {
     (b'A' + idx as u8) as char
 }
 
+/// A board's anchors and cross-checks (see [`Solver::analysis`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardAnalysis {
+    info: BoardInfo,
+}
+
+impl BoardAnalysis {
+    /// The analysis of `board`, which is the board this analysis was made
+    /// of with tiles newly placed on the `placed` squares. Only the squares
+    /// those tiles can affect are recomputed: the placed squares, and the
+    /// empty square at each end of the row and column runs through them.
+    pub fn after_placing(
+        &self,
+        board: &Board,
+        dictionary: &Dictionary,
+        placed: &[(usize, usize)],
+    ) -> BoardAnalysis {
+        let solver = Solver::new(board, dictionary);
+        if self.info.tile_count == 0 {
+            // The first move: the start square is no longer the anchor.
+            return solver.analysis();
+        }
+        let mut info = self.info.clone();
+        info.tile_count += placed.len();
+        for &(row, col) in placed {
+            solver.analyze_square(&mut info, row, col);
+            for (dr, dc) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let (mut r, mut c) = (row as i32, col as i32);
+                while Board::is_valid_position(r, c)
+                    && board.get_tile(r as usize, c as usize).is_some()
+                {
+                    r += dr;
+                    c += dc;
+                }
+                if Board::is_valid_position(r, c) {
+                    solver.analyze_square(&mut info, r as usize, c as usize);
+                }
+            }
+        }
+        BoardAnalysis { info }
+    }
+}
+
 /// The move generation solver
 pub struct Solver<'a> {
     board: &'a Board,
@@ -279,13 +322,14 @@ pub struct Solver<'a> {
     /// The board's rules, kept at hand for the search.
     rules: &'static Rules,
     /// The board analysis, when computed up front ([`Self::prepared`]).
-    info: Option<Box<BoardInfo>>,
+    info: Option<std::borrow::Cow<'a, BoardInfo>>,
 }
 
 /// Board-derived tables that depend only on the position, not the rack.
 ///
 /// Indexed `[direction][row][col]` where direction 0 = horizontal word,
 /// 1 = vertical word (the cross-check constrains the perpendicular word).
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BoardInfo {
     /// Allowed letters (bit `i` = letter `A + i`) for a tile placed here as
     /// part of a word in the given direction.
@@ -694,7 +738,7 @@ impl<'a> Solver<'a> {
     /// every search. Worth it when one board is searched with many racks,
     /// as rack inference does.
     pub fn prepared(mut self) -> Self {
-        self.info = Some(Box::new(self.analyze_board()));
+        self.info = Some(std::borrow::Cow::Owned(self.analyze_board()));
         self
     }
 
@@ -1036,24 +1080,56 @@ impl<'a> Solver<'a> {
 
         for row in 0..BOARD_SIZE {
             for col in 0..BOARD_SIZE {
-                if self.board.get_tile(row, col).is_some() {
-                    continue;
-                }
-                if !self.board.has_adjacent_tile(row, col) {
-                    continue;
-                }
-                info.anchor[row][col] = true;
-                for dir in [Direction::Horizontal, Direction::Vertical] {
-                    let di = dir_index(dir);
-                    let (mask, score, has) = self.cross_check(row, col, dir.perpendicular());
-                    info.cross_mask[di][row][col] = mask;
-                    info.cross_score[di][row][col] = score;
-                    info.cross_has[di][row][col] = has;
-                }
+                self.analyze_square(&mut info, row, col);
             }
         }
-
         info
+    }
+
+    /// Set the anchor flag and cross-checks of one square from the board:
+    /// an empty square next to a tile is an anchor with its cross-checks;
+    /// any other square has none.
+    fn analyze_square(&self, info: &mut BoardInfo, row: usize, col: usize) {
+        let anchor =
+            self.board.get_tile(row, col).is_none() && self.board.has_adjacent_tile(row, col);
+        info.anchor[row][col] = anchor;
+        for dir in [Direction::Horizontal, Direction::Vertical] {
+            let di = dir_index(dir);
+            let (mask, score, has) = if anchor {
+                self.cross_check(row, col, dir.perpendicular())
+            } else {
+                (ALL_LETTERS, 0, false)
+            };
+            info.cross_mask[di][row][col] = mask;
+            info.cross_score[di][row][col] = score;
+            info.cross_has[di][row][col] = has;
+        }
+    }
+
+    /// The board's anchors and cross-checks, to reuse across searches
+    /// ([`Solver::with_analysis`]) and update after a move
+    /// ([`BoardAnalysis::after_placing`]).
+    pub fn analysis(&self) -> BoardAnalysis {
+        BoardAnalysis {
+            info: match &self.info {
+                Some(info) => info.clone().into_owned(),
+                None => self.analyze_board(),
+            },
+        }
+    }
+
+    /// A solver for `board` using an analysis already made of it.
+    pub fn with_analysis(
+        board: &'a Board,
+        dictionary: &'a Dictionary,
+        analysis: &'a BoardAnalysis,
+    ) -> Self {
+        Solver {
+            board,
+            dictionary,
+            rules: board.rules(),
+            info: Some(std::borrow::Cow::Borrowed(&analysis.info)),
+        }
     }
 
     /// Compute which letters can be placed at (row, col) given the existing
@@ -2291,6 +2367,48 @@ mod tests {
     /// The best-move searches must agree with the full move list: the same
     /// best play by equity, the same best score, and the same top-k plays
     /// in the same order. Exchanges likewise against `exchange_moves`.
+    /// Updating the analysis after each move gives exactly what analysing
+    /// the new board from scratch does, over whole self-played games under
+    /// both rule sets.
+    #[test]
+    fn incremental_analysis_matches_a_full_one() {
+        let Some(dict) = crate::test_data::dictionary() else {
+            return;
+        };
+        let mut moves_checked = 0;
+        for rules in [&crate::rules::CROSSPLAY, &crate::rules::SCRABBLE] {
+            for seed in 0..10u64 {
+                let mut rng = fastrand::Rng::with_seed(seed);
+                let mut bag = rules.full_tile_set();
+                rng.shuffle(&mut bag);
+                let mut board = Board::with_rules(rules);
+                let mut analysis = Solver::new(&board, &dict).analysis();
+                while bag.len() >= RACK_SIZE {
+                    let rack = bag.split_off(bag.len() - RACK_SIZE);
+                    let Some(mv) =
+                        Solver::with_analysis(&board, &dict, &analysis).best_move_by_equity(&rack)
+                    else {
+                        break;
+                    };
+                    let placed: Vec<(usize, usize)> =
+                        mv.tiles_used.iter().map(|&(r, c, _)| (r, c)).collect();
+                    for &(r, c, t) in &mv.tiles_used {
+                        board.place_tile(r, c, t);
+                    }
+                    analysis = analysis.after_placing(&board, &dict, &placed);
+                    assert_eq!(
+                        analysis,
+                        Solver::new(&board, &dict).analysis(),
+                        "{} seed {seed}",
+                        rules.name
+                    );
+                    moves_checked += 1;
+                }
+            }
+        }
+        assert!(moves_checked > 100, "{moves_checked}");
+    }
+
     /// The pruned searches return exactly what the full list says, on
     /// many random racks: the best play (same tiles, same tie choice), the
     /// top k in order, the best score, and whether any play beats a

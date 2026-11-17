@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::board::{Board, BOARD_SIZE};
 use crate::dictionary::Dictionary;
 use crate::rules::Ending;
-use crate::solver::{Move, MoveKind, Solver};
+use crate::solver::{BoardAnalysis, Move, MoveKind, Solver};
 use crate::tile::Tile;
 
 /// A root move and what it is worth (spread change to the end of the game,
@@ -237,8 +237,14 @@ impl Search<'_> {
 
     /// The side to move's moves, most promising first: plays that go out
     /// (by score plus the bonus), then by score, then passing.
-    fn ordered_moves(&self, board: &Board, mover: &[Tile], other: &[Tile]) -> Vec<Move> {
-        let mut moves = Solver::new(board, self.dict).find_moves_for(mover);
+    fn ordered_moves(
+        &self,
+        board: &Board,
+        analysis: &BoardAnalysis,
+        mover: &[Tile],
+        other: &[Tile],
+    ) -> Vec<Move> {
+        let mut moves = Solver::with_analysis(board, self.dict, analysis).find_moves_for(mover);
         let bonus = 2 * rack_value(board, other);
         moves.sort_by_cached_key(|m| {
             let out = m.tiles_used.len() == mover.len();
@@ -263,9 +269,11 @@ impl Search<'_> {
         let mut alpha = i32::MIN + 1;
         let mut horizon = false;
         let mut board = board.clone();
-        let moves = order.unwrap_or_else(|| self.ordered_moves(&board, ours, theirs));
+        let analysis = Solver::new(&board, self.dict).analysis();
+        let moves = order.unwrap_or_else(|| self.ordered_moves(&board, &analysis, ours, theirs));
         for mv in moves {
             let (value, h) = self.child_value(
+                &analysis,
                 &mut board,
                 ours,
                 theirs,
@@ -296,6 +304,7 @@ impl Search<'_> {
     #[allow(clippy::too_many_arguments)]
     fn child_value(
         &mut self,
+        analysis: &BoardAnalysis,
         board: &mut Board,
         mover: &[Tile],
         other: &[Tile],
@@ -315,7 +324,14 @@ impl Search<'_> {
         for (r, c, t) in &mv.tiles_used {
             board.place_tile(*r, *c, *t);
         }
+        let placed: Vec<(usize, usize)> = mv.tiles_used.iter().map(|&(r, c, _)| (r, c)).collect();
+        let child = if placed.is_empty() {
+            analysis.clone()
+        } else {
+            analysis.after_placing(board, self.dict, &placed)
+        };
         let reply = self.negamax(
+            &child,
             board,
             other,
             &left,
@@ -336,6 +352,7 @@ impl Search<'_> {
     #[allow(clippy::too_many_arguments)] // the search state, recursively
     fn negamax(
         &mut self,
+        analysis: &BoardAnalysis,
         board: &mut Board,
         mover: &[Tile],
         other: &[Tile],
@@ -371,7 +388,7 @@ impl Search<'_> {
         let mut best = i32::MIN + 1;
         let mut best_index = 0;
         let mut horizon = false;
-        let moves = self.ordered_moves(board, mover, other);
+        let moves = self.ordered_moves(board, analysis, mover, other);
         // The best move from an earlier visit first, then the rest in order.
         let first = self
             .table
@@ -384,9 +401,12 @@ impl Search<'_> {
             // (a null window), and searched fully only if they do.
             let mv = &moves[i];
             let (value, h) = if n == 0 {
-                self.child_value(board, mover, other, scoreless, mv, depth, alpha, beta)?
+                self.child_value(
+                    analysis, board, mover, other, scoreless, mv, depth, alpha, beta,
+                )?
             } else {
                 let probe = self.child_value(
+                    analysis,
                     board,
                     mover,
                     other,
@@ -397,7 +417,9 @@ impl Search<'_> {
                     alpha.saturating_add(1),
                 )?;
                 if probe.0 > alpha && probe.0 < beta {
-                    self.child_value(board, mover, other, scoreless, mv, depth, alpha, beta)?
+                    self.child_value(
+                        analysis, board, mover, other, scoreless, mv, depth, alpha, beta,
+                    )?
                 } else {
                     probe
                 }
