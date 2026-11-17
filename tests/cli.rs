@@ -114,7 +114,7 @@ fn infer_reports_the_kept_letters() {
         "--score",
         "43",
     ]));
-    assert!(out.starts_with("77234 racks consistent"), "{out}");
+    assert!(out.starts_with("77001 racks consistent"), "{out}");
 }
 
 /// A self-played position with one tile in the bag, solved by the tool.

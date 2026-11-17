@@ -33,7 +33,7 @@ pub fn dictionary() -> Option<Dictionary> {
         return None;
     }
     let dict = Dictionary::load_from_fst(&words).expect("dictionary");
-    let leaves = root().join("external/refengine/data/lexica/AMERICAN.klv2");
+    let leaves = root().join("data/leaves.rlv");
     Some(if is_data(&leaves) {
         dict.with_leaves(LeaveValues::load(&leaves).expect("leave table"))
     } else {

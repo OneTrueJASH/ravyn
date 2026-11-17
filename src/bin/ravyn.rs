@@ -14,7 +14,9 @@ use ravyn::dictionary::Dictionary;
 use ravyn::endgame::{EndgameSolver, FinalTurn};
 use ravyn::game::SolverState;
 use ravyn::inference::{infer_leave, InferenceSettings};
+use ravyn::leavegen::{train_generation, TrainingSettings};
 use ravyn::leaves::LeaveValues;
+use ravyn::mcts::{self_play_match, MatchEngine};
 use ravyn::negamax::{solve_go_out, GoOutSettings};
 use ravyn::preendgame::solve_one_in_bag;
 use ravyn::rules::{Ending, Rules, CROSSPLAY, SCRABBLE};
@@ -26,6 +28,8 @@ const USAGE: &str = "\
 ravyn: the RAVYN crossword-game engine
 
 usage: ravyn <command> '<CGP>' [options]
+       ravyn train-leaves [--games N] [--generations G] [--out FILE] [--from FILE]
+       ravyn match --a FILE --b FILE [--pairs N]
 
 commands:
   gen         every play, exchange and pass, best static equity first
@@ -36,6 +40,13 @@ commands:
               (Crossplay)
   infer       what the opponent kept: CGP is the board BEFORE their play,
               with OUR rack; needs --played and --score
+  train-leaves  fit leave values by self-play, generation by generation,
+              each playing with the last one's values (the first with
+              --from, or the per-letter heuristic); saves to --out
+              (default leaves.rlv) after every generation
+  match       self-play match between two leave tables (--a, --b: a
+              leave table file, or `none` for the heuristic): A's score and
+              mean spread over --pairs paired games (default 1000)
 
 options:
   --rules NAME    `crossplay` (default) or `scrabble`
@@ -46,14 +57,27 @@ options:
                   they emptied the bag) or `us`
   --played TILES  infer: the tiles they played, `?` for a blank
   --score N       infer: what their play scored
-  --data DIR      directory holding data/words.fst and the leave table
-                  external/refengine/data/lexica/AMERICAN.klv2 (default:
+  --games N       train-leaves: games per generation (default 200000)
+  --generations G train-leaves: generations (default 3)
+  --seed S        train-leaves and match: seed (default 1)
+  --data DIR      directory holding data/words.fst and data/leaves.rlv
+                  (default:
                   $RAVYN_DATA, then the current directory)
 
 CGP: BOARD RACK[/OPP] [OURS/THEIRS ...], e.g.
   ravyn gen '15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 AEINRST/ 0/0 0'";
 
-const COMMANDS: [&str; 5] = ["gen", "sim", "endgame", "preendgame", "infer"];
+const COMMANDS: [&str; 7] = [
+    "gen",
+    "sim",
+    "endgame",
+    "preendgame",
+    "infer",
+    "train-leaves",
+    "match",
+];
+/// Commands that take no position.
+const NO_POSITION: [&str; 2] = ["train-leaves", "match"];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -82,6 +106,14 @@ struct Options {
     score: Option<u32>,
     data: Option<PathBuf>,
     rules: &'static Rules,
+    games: usize,
+    generations: usize,
+    seed: u64,
+    out: PathBuf,
+    from: Option<PathBuf>,
+    a: Option<String>,
+    b: Option<String>,
+    pairs: usize,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -97,6 +129,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
         score: None,
         data: None,
         rules: &CROSSPLAY,
+        games: 200_000,
+        generations: 3,
+        seed: 1,
+        out: PathBuf::from("leaves.rlv"),
+        from: None,
+        a: None,
+        b: None,
+        pairs: 1000,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -118,6 +158,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--score" => o.score = Some(number("--score", value("--score")?)? as u32),
             "--played" => o.played = Some(value("--played")?),
             "--data" => o.data = Some(PathBuf::from(value("--data")?)),
+            "--games" => o.games = number("--games", value("--games")?)? as usize,
+            "--generations" => {
+                o.generations = number("--generations", value("--generations")?)? as usize
+            }
+            "--seed" => o.seed = number("--seed", value("--seed")?)?,
+            "--pairs" => o.pairs = number("--pairs", value("--pairs")?)? as usize,
+            "--out" => o.out = PathBuf::from(value("--out")?),
+            "--from" => o.from = Some(PathBuf::from(value("--from")?)),
+            "--a" => o.a = Some(value("--a")?),
+            "--b" => o.b = Some(value("--b")?),
             "--rules" => {
                 o.rules = match value("--rules")?.to_ascii_lowercase().as_str() {
                     "crossplay" => &CROSSPLAY,
@@ -147,7 +197,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             COMMANDS.join(", ")
         ));
     }
-    o.cgp = positional.next().ok_or("missing the position (CGP)")?;
+    if !NO_POSITION.contains(&o.command.as_str()) {
+        o.cgp = positional.next().ok_or("missing the position (CGP)")?;
+    }
     if let Some(extra) = positional.next() {
         return Err(format!("unexpected argument {extra} (quote the CGP)"));
     }
@@ -201,19 +253,37 @@ fn unseen(state: &SolverState) -> Vec<Tile> {
         .collect()
 }
 
-fn load_dictionary(dir: Option<&Path>) -> Result<Dictionary, String> {
-    let root = dir
-        .map(Path::to_path_buf)
+fn data_root(dir: Option<&Path>) -> PathBuf {
+    dir.map(Path::to_path_buf)
         .or_else(|| std::env::var_os("RAVYN_DATA").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let words = root.join("data/words.fst");
-    let dict = Dictionary::load_from_fst(&words).map_err(|e| {
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The word list alone, without leave values.
+fn load_words(dir: Option<&Path>) -> Result<Dictionary, String> {
+    let words = data_root(dir).join("data/words.fst");
+    Dictionary::load_from_fst(&words).map_err(|e| {
         format!(
             "{}: {e:#} (point --data at a directory holding data/)",
             words.display()
         )
-    })?;
-    let leaves = root.join("external/refengine/data/lexica/AMERICAN.klv2");
+    })
+}
+
+/// A leave table from a file, or `None` for `none` (the heuristic).
+fn load_leaves(spec: &str) -> Result<Option<LeaveValues>, String> {
+    if spec == "none" {
+        return Ok(None);
+    }
+    LeaveValues::load(spec)
+        .map(Some)
+        .map_err(|e| format!("{spec}: {e:#}"))
+}
+
+fn load_dictionary(dir: Option<&Path>) -> Result<Dictionary, String> {
+    let root = data_root(dir);
+    let dict = load_words(dir)?;
+    let leaves = root.join("data/leaves.rlv");
     Ok(match LeaveValues::load(&leaves) {
         Ok(table) => dict.with_leaves(table),
         Err(e) => {
@@ -225,6 +295,11 @@ fn load_dictionary(dir: Option<&Path>) -> Result<Dictionary, String> {
 
 fn run(args: &[String]) -> Result<(), String> {
     let o = parse(args)?;
+    match o.command.as_str() {
+        "train-leaves" => return train_leaves(&o),
+        "match" => return leave_match(&o),
+        _ => {}
+    }
     let state = SolverState::from_cgp_with_rules(&o.cgp, o.rules)?;
     let dict = load_dictionary(o.data.as_deref())?.for_rules(o.rules);
     match o.command.as_str() {
@@ -519,5 +594,80 @@ fn infer(o: &Options, state: &SolverState, dict: &Dictionary) -> Result<(), Stri
     for (leave, pct) in result.top_leaves.iter().take(o.top.min(10)) {
         println!("  {leave:<8} {pct:>5.2}%");
     }
+    Ok(())
+}
+
+/// Fit leave values by self-play, generation by generation.
+fn train_leaves(o: &Options) -> Result<(), String> {
+    let mut current = match &o.from {
+        Some(path) => load_leaves(&path.to_string_lossy())?,
+        None => None,
+    };
+    for generation in 1..=o.generations.max(1) {
+        let mut dict = load_words(o.data.as_deref())?.for_rules(o.rules);
+        if let Some(table) = current.take() {
+            dict = dict.with_leaves(table);
+        }
+        let settings = TrainingSettings {
+            games: o.games.max(1),
+            seed: o.seed.wrapping_add(generation as u64),
+            ..TrainingSettings::default()
+        };
+        let started = std::time::Instant::now();
+        let (table, report) = train_generation(&dict, o.rules, &settings);
+        table
+            .save(&o.out, &o.rules.distribution)
+            .map_err(|e| format!("{}: {e:#}", o.out.display()))?;
+        let v = |s: &str| table.value(&tiles(s)).unwrap_or(f32::NAN);
+        println!(
+            "generation {generation}: {} games, {} samples, {} leaves seen, {:.0}s; \
+             ? {:+.1} S {:+.1} Q {:+.1} ERS {:+.1} UUV {:+.1}; saved {}",
+            report.games,
+            report.samples,
+            report.leaves_seen,
+            started.elapsed().as_secs_f32(),
+            v("?"),
+            v("S"),
+            v("Q"),
+            v("ERS"),
+            v("UUV"),
+            o.out.display()
+        );
+        current = Some(table);
+    }
+    Ok(())
+}
+
+/// Self-play match between two leave tables.
+fn leave_match(o: &Options) -> Result<(), String> {
+    let (a, b) = match (&o.a, &o.b) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return Err("match needs --a and --b (a leave table file, or `none`)".into()),
+    };
+    let dict_for = |spec: &str| -> Result<Dictionary, String> {
+        let dict = load_words(o.data.as_deref())?.for_rules(o.rules);
+        Ok(match load_leaves(spec)? {
+            Some(table) => dict.with_leaves(table),
+            None => dict,
+        })
+    };
+    let (da, db) = (dict_for(a)?, dict_for(b)?);
+    let engine = |name, dict| MatchEngine {
+        name,
+        dict,
+        allow_pass: true,
+        sim: None,
+    };
+    let started = std::time::Instant::now();
+    let r = self_play_match(&engine(a, &da), &engine(b, &db), o.pairs.max(1), o.seed);
+    println!(
+        "{a} vs {b}: {} games in {:.0}s; A scores {:.3} +- {:.3}, spread {:+.2} +- {:.2} per game",
+        r.games,
+        started.elapsed().as_secs_f32(),
+        r.score,
+        r.score_ci95,
+        r.spread,
+        r.spread_ci95
+    );
     Ok(())
 }

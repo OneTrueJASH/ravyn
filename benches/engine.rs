@@ -2,7 +2,7 @@
 //!
 //! Run with `cargo bench --bench engine`. Positions are the ones the test
 //! suite uses (EMPTY, MID, END, and BEECH for blank-heavy racks). Data is
-//! read from the workspace root (`data/words.fst` and RefEngine's leave table).
+//! read from the workspace root (`data/words.fst` and `data/leaves.rlv`).
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -27,7 +27,7 @@ const END: &str = "3N3Q3M3/3OP2UNTEACH1/3BE2O3N3/3LA2T2MYOPE/2FeR2H1LO4/2O6AB4/2
 fn dictionary() -> Dictionary {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dict = Dictionary::load_from_fst(root.join("data/words.fst")).expect("dictionary");
-    match LeaveValues::load(root.join("external/refengine/data/lexica/AMERICAN.klv2")) {
+    match LeaveValues::load(root.join("data/leaves.rlv")) {
         Ok(table) => dict.with_leaves(table),
         Err(e) => {
             eprintln!("leave table unavailable ({e:#}); heuristic leaves");

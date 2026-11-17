@@ -1,37 +1,19 @@
-//! Leave values from a RefEngine `.klv2` file.
+//! Leave values: what keeping a set of tiles is worth, in points of
+//! equity, relative to keeping nothing.
 //!
-//! A KLV2 file is a KWG (a DAWG of every rack leave, tiles sorted with the
-//! blank first) followed by one 32-bit float per leave in DAWG order:
-//!
-//! ```text
-//! u32 LE  node count
-//! u32 LE  nodes[node count]   bits 0-21 arc index, 22 is-end, 23 accepts,
-//!                             24-31 tile (0 = blank, 1-26 = A-Z)
-//! u32 LE  leave count
-//! f32 LE  values[leave count]
-//! ```
-//!
-//! Node 0 points at the DAWG root's first child. A node's children start at
-//! its arc index and run until a node with the is-end bit. The value index
-//! of a leave is the number of accepting nodes that precede it in depth-first
-//! order, which we compute from per-node subtree word counts.
-//!
-//! The values were fitted for standard English Scrabble (2 blanks, 4 S's,
-//! 50-point bingos). Crossplay has 3 blanks, 5 S's and 40-point bingos. The
-//! bonus difference is corrected for here ([`bingo_bonus_correction`]): a
-//! leave that makes a bingo more likely is worth 10 points less per unit of
-//! probability than the table says. The remaining differences (tile counts,
-//! board) are second order; the table is still far better calibrated than
-//! per-letter guesses.
+//! The values are trained by self-play ([`crate::leavegen`]) for one game's
+//! rules and saved as an `RLV2` file ([`LeaveValues::save`]): the bag they
+//! were trained with, then one 16-bit value per possible leave of 1-6
+//! tiles in a fixed order ([`all_leave_keys`]). A table played under a
+//! different bingo bonus than it was fitted for is corrected
+//! ([`bingo_bonus_correction`]).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
 use crate::tile::Tile;
-
-/// Scrabble's bingo bonus, the one the leave table was fitted under.
-const TABLE_BINGO_BONUS: f32 = 50.0;
 
 /// Logistic model of the probability that a rack keeping a given leave
 /// finds a bingo on its next turn, in Crossplay self-play positions:
@@ -67,218 +49,172 @@ pub fn bingo_probability(leave: &[Tile]) -> f32 {
     1.0 / (1.0 + (-z).exp())
 }
 
-/// Adjustment that converts a table value fitted under a 50-point bingo
-/// bonus to Crossplay's 40: minus 10 points per unit of extra next-turn
-/// bingo probability relative to drawing seven fresh tiles. First order
-/// only (the following turn's bingo chances are not adjusted).
-pub fn bingo_bonus_correction(leave: &[Tile], bingo_bonus: u32) -> f32 {
+/// Adjustment that converts a leave value fitted under a `fitted` bingo
+/// bonus to one worth `bingo_bonus`: the difference in bonus per unit of
+/// extra next-turn bingo probability relative to drawing seven fresh tiles
+/// (RefEngine's table, fitted at 50, loses 10 points per unit in Crossplay).
+/// First order only (the following turn's bingo chances are not adjusted).
+pub fn bingo_bonus_correction(leave: &[Tile], fitted: u32, bingo_bonus: u32) -> f32 {
+    if fitted == bingo_bonus {
+        return 0.0;
+    }
     // The empty leave's probability is a constant of the model.
     static P0: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| bingo_probability(&[]));
     let p = bingo_probability(leave);
     let p0 = *P0;
-    (bingo_bonus as f32 - TABLE_BINGO_BONUS) * (p - p0)
+    (bingo_bonus as f32 - fitted as f32) * (p - p0)
 }
 
-const ARC_MASK: u32 = 0x3F_FFFF;
-const IS_END: u32 = 1 << 22;
-const ACCEPTS: u32 = 1 << 23;
+/// Key of a leave in a trained table: its tile codes sorted ascending (0 =
+/// blank, 1-26 = A-Z), each plus one, in five bits apiece (up to six).
+pub fn leave_key(codes: &[u8]) -> u32 {
+    codes.iter().fold(0, |k, &c| (k << 5) | (c as u32 + 1))
+}
 
-/// Leave value table backed by a KLV2 DAWG.
+/// Magic bytes of a leave table file (see [`LeaveValues::save`]).
+const RLV2_MAGIC: &[u8; 4] = b"RLV2";
+
+/// Every leave of 1-6 tiles a bag with `distribution` (A-Z, then blanks)
+/// allows, as [`leave_key`]s, in a fixed order: by size, then tile codes
+/// ascending. Compact tables store their values in this order.
+pub fn all_leave_keys(distribution: &[u8; 27]) -> Vec<u32> {
+    // Codes 0 (blank) then 1-26 (A-Z), with their counts.
+    let mut avail = [0u8; 27];
+    avail[0] = distribution[26];
+    avail[1..].copy_from_slice(&distribution[..26]);
+    fn go(
+        avail: &[u8; 27],
+        size: usize,
+        from: usize,
+        codes: &mut Vec<u8>,
+        used: &mut [u8; 27],
+        out: &mut Vec<u32>,
+    ) {
+        if size == 0 {
+            out.push(leave_key(codes));
+            return;
+        }
+        for c in from..27 {
+            if used[c] < avail[c] {
+                used[c] += 1;
+                codes.push(c as u8);
+                go(avail, size - 1, c, codes, used, out);
+                codes.pop();
+                used[c] -= 1;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for size in 1..=6 {
+        go(
+            &avail,
+            size,
+            0,
+            &mut Vec::with_capacity(6),
+            &mut [0u8; 27],
+            &mut out,
+        );
+    }
+    out
+}
+
+/// A table of leave values by [`leave_key`], for leaves of 1-6 tiles.
 pub struct LeaveValues {
-    nodes: Vec<u32>,
-    /// Words in the subtree of node `i` plus those of its following siblings.
-    counts: Vec<u32>,
-    values: Vec<f32>,
+    values: HashMap<u32, f32>,
+    /// The bingo bonus the values were fitted under.
+    fitted_bingo_bonus: u32,
 }
 
 impl LeaveValues {
-    /// Load a `.klv2` file.
+    /// Load an `RLV2` leave table.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let bytes = std::fs::read(path.as_ref()).context("Failed to read leave values")?;
-        Self::parse(&bytes)
+        Self::parse_rlv2(&bytes)
     }
 
-    /// Parse the bytes of a `.klv2` file (the file contents are untrusted:
-    /// every count and index is checked; fuzzed in `fuzz/`).
-    pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let u32_at = |off: usize| -> Result<u32> {
-            bytes
-                .get(off..off + 4)
-                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .context("truncated leave file")
-        };
+    /// A table of `values` by [`leave_key`], fitted under `fitted_bingo_bonus`.
+    pub fn from_table(values: HashMap<u32, f32>, fitted_bingo_bonus: u32) -> Self {
+        LeaveValues {
+            values,
+            fitted_bingo_bonus,
+        }
+    }
 
-        let node_count = u32_at(0)? as usize;
-        // The count comes from the file: check it against the file's
-        // length before reserving memory for it.
-        let nodes_end = node_count
-            .checked_mul(4)
-            .and_then(|n| n.checked_add(4))
-            .filter(|&end| end <= bytes.len())
-            .context("leave file declares more nodes than it holds")?;
-        let mut nodes = Vec::with_capacity(node_count);
-        for i in 0..node_count {
-            nodes.push(u32_at(4 + i * 4)?);
+    /// The bingo bonus the values were fitted under.
+    pub fn fitted_bingo_bonus(&self) -> u32 {
+        self.fitted_bingo_bonus
+    }
+
+    /// Save a trained table for `distribution` (the bag it was trained
+    /// with, A-Z then blanks) as an `RLV2` file: the magic, the fitted
+    /// bingo bonus (u32), the distribution (27 bytes), the leave count
+    /// (u32), then each leave's value in hundredths of a point (i16), in
+    /// [`all_leave_keys`] order; little-endian. About 1.8 MB for
+    /// Crossplay. Leaves missing from the table are written as 0.
+    pub fn save<P: AsRef<Path>>(&self, path: P, distribution: &[u8; 27]) -> Result<()> {
+        let map = &self.values;
+        let keys = all_leave_keys(distribution);
+        let mut out = Vec::with_capacity(4 + 4 + 27 + 4 + keys.len() * 2);
+        out.extend_from_slice(RLV2_MAGIC);
+        out.extend_from_slice(&self.fitted_bingo_bonus.to_le_bytes());
+        out.extend_from_slice(distribution);
+        out.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+        for k in keys {
+            let v = map.get(&k).copied().unwrap_or(0.0);
+            let hundredths = (v * 100.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            out.extend_from_slice(&hundredths.to_le_bytes());
         }
-        let values_off = nodes_end;
-        let value_count = u32_at(values_off)? as usize;
-        let data_off = values_off + 4;
-        let fits = value_count
-            .checked_mul(4)
-            .and_then(|n| n.checked_add(data_off))
-            .is_some_and(|end| end <= bytes.len());
-        if !fits {
-            bail!("leave file is shorter than its declared value count");
+        std::fs::write(path.as_ref(), out).context("Failed to write leave values")
+    }
+
+    /// Parse an `RLV2` file (untrusted: sizes are checked).
+    pub fn parse_rlv2(bytes: &[u8]) -> Result<Self> {
+        if !bytes.starts_with(RLV2_MAGIC) || bytes.len() < 4 + 4 + 27 + 4 {
+            bail!("not an RLV2 leave table");
         }
-        let values: Vec<f32> = (0..value_count)
-            .map(|i| {
-                let b = &bytes[data_off + i * 4..data_off + i * 4 + 4];
-                f32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        let fitted = u32::from_le_bytes(bytes[4..8].try_into().expect("4 bytes"));
+        let distribution: [u8; 27] = bytes[8..35].try_into().expect("27 bytes");
+        if distribution.iter().any(|&n| n > 30) {
+            bail!("leave table distribution is implausible");
+        }
+        let count = u32::from_le_bytes(bytes[35..39].try_into().expect("4 bytes")) as usize;
+        // The size check first: enumerating the leaves is the costly part.
+        if count.checked_mul(2).and_then(|n| n.checked_add(39)) != Some(bytes.len()) {
+            bail!("leave table size does not match its leave count");
+        }
+        let keys = all_leave_keys(&distribution);
+        if count != keys.len() {
+            bail!("leave table size does not match its distribution");
+        }
+        let map = keys
+            .into_iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let off = 39 + i * 2;
+                let v = i16::from_le_bytes([bytes[off], bytes[off + 1]]);
+                (k, v as f32 / 100.0)
             })
             .collect();
-
-        if nodes.is_empty() {
-            bail!("leave file has no nodes");
-        }
-        for &n in &nodes {
-            if (n & ARC_MASK) as usize >= node_count {
-                bail!("leave file node points outside the node table");
-            }
-        }
-
-        // Subtree word counts via an explicit depth-first walk (the table
-        // has thousands of nodes and shared subtrees, so recursion depth
-        // and memoisation both matter). A node depends on its first child
-        // (arc) and its next sibling (p + 1). State: 0 unvisited, 1 on the
-        // current path, 2 done; meeting a node in state 1 means a cycle.
-        let mut counts = vec![0u32; node_count];
-        let mut state = vec![0u8; node_count];
-        let mut stack: Vec<usize> = Vec::new();
-        for start in 0..node_count {
-            if state[start] == 2 {
-                continue;
-            }
-            stack.push(start);
-            while let Some(&p) = stack.last() {
-                if state[p] == 2 {
-                    stack.pop();
-                    continue;
-                }
-                state[p] = 1;
-                let node = nodes[p];
-                let arc = (node & ARC_MASK) as usize;
-                let next = if node & IS_END == 0 {
-                    Some(p + 1)
-                } else {
-                    None
-                };
-                if let Some(n) = next {
-                    if n >= node_count {
-                        bail!("leave file sibling list runs off the node table");
-                    }
-                }
-                let mut pending = None;
-                for dep in [if arc != 0 { Some(arc) } else { None }, next]
-                    .into_iter()
-                    .flatten()
-                {
-                    match state[dep] {
-                        2 => {}
-                        1 => bail!("leave file DAWG contains a cycle"),
-                        _ => {
-                            pending = Some(dep);
-                            break;
-                        }
-                    }
-                }
-                if let Some(dep) = pending {
-                    stack.push(dep);
-                    continue;
-                }
-                let mut c = if node & ACCEPTS != 0 { 1 } else { 0 };
-                if arc != 0 {
-                    c += counts[arc];
-                }
-                if let Some(n) = next {
-                    c += counts[n];
-                }
-                counts[p] = c;
-                state[p] = 2;
-                stack.pop();
-            }
-        }
-
-        let root = (nodes[0] & ARC_MASK) as usize;
-        let total = if root == 0 { 0 } else { counts[root] as usize };
-        if total != value_count {
-            bail!(
-                "leave file DAWG holds {} leaves but {} values",
-                total,
-                value_count
-            );
-        }
-
-        Ok(LeaveValues {
-            nodes,
-            counts,
-            values,
-        })
+        Ok(Self::from_table(map, fitted))
     }
 
     /// Number of leaves in the table.
     pub fn len(&self) -> usize {
         self.values.len()
     }
+
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
     /// Value of a leave given as tile codes sorted ascending (0 = blank,
-    /// 1-26 = A-Z). Returns `None` for the empty leave or a leave not in
-    /// the table (more than 6 tiles, or one the fitting never saw).
+    /// 1-26 = A-Z). `None` for the empty leave or one not in the table
+    /// (more than six tiles, or more of a tile than the bag holds).
     pub fn value_of_codes(&self, codes: &[u8]) -> Option<f32> {
-        if codes.is_empty() {
+        if codes.is_empty() || codes.len() > 6 {
             return None;
         }
-        let mut p = (self.nodes[0] & ARC_MASK) as usize;
-        if p == 0 {
-            return None;
-        }
-        let mut idx = 0u32;
-        for (i, &tile) in codes.iter().enumerate() {
-            loop {
-                let node = self.nodes[p];
-                if (node >> 24) as u8 == tile {
-                    if i + 1 == codes.len() {
-                        return if node & ACCEPTS != 0 {
-                            self.values.get(idx as usize).copied()
-                        } else {
-                            None
-                        };
-                    }
-                    if node & ACCEPTS != 0 {
-                        idx += 1;
-                    }
-                    p = (node & ARC_MASK) as usize;
-                    if p == 0 {
-                        return None;
-                    }
-                    break;
-                }
-                // Skip this sibling's whole subtree.
-                let own = if node & IS_END == 0 {
-                    self.counts[p] - self.counts[p + 1]
-                } else {
-                    self.counts[p]
-                };
-                idx += own;
-                if node & IS_END != 0 {
-                    return None;
-                }
-                p += 1;
-            }
-        }
-        None
+        self.values.get(&leave_key(codes)).copied()
     }
 
     /// Value of a leave given as tiles (any order).
@@ -302,46 +238,41 @@ impl LeaveValues {
 mod tests {
     use super::*;
 
+    /// The shipped table covers every leave and shows the well-known
+    /// orderings: a blank beats an S, which beats a V, which beats a Q.
     #[test]
-    fn loads_and_indexes_consistently() {
-        let Some(klv_path) = crate::test_data::file(crate::test_data::LEAVES_KLV2) else {
+    fn the_shipped_table_loads_and_orders_sensibly() {
+        let Some(path) = crate::test_data::file(crate::test_data::LEAVES) else {
             return;
         };
-        let lv = LeaveValues::load(klv_path).expect("leave table parses");
-        assert_eq!(lv.len(), 914_624);
-
-        // Well-known orderings from any leave table: a blank beats an S
-        // beats a V; the empty leave is not in the table.
-        let blank = lv.value(&[Tile::blank(' ')]).unwrap();
-        let s = lv.value(&[Tile::new('S')]).unwrap();
-        let v = lv.value(&[Tile::new('V')]).unwrap();
-        let q = lv.value(&[Tile::new('Q')]).unwrap();
-        assert!(
-            blank > s && s > 0.0 && v < 0.0 && q < v,
-            "{blank} {s} {v} {q}"
+        let lv = LeaveValues::load(path).expect("leave table parses");
+        assert_eq!(
+            lv.len(),
+            all_leave_keys(&crate::rules::CROSSPLAY.distribution).len()
         );
+        assert_eq!(lv.fitted_bingo_bonus(), crate::rules::CROSSPLAY.bingo_bonus);
+        let v = |s: &str| {
+            let t: Vec<Tile> = s
+                .chars()
+                .map(|c| {
+                    if c == '?' {
+                        Tile::blank(' ')
+                    } else {
+                        Tile::new(c)
+                    }
+                })
+                .collect();
+            lv.value(&t).unwrap()
+        };
+        assert!(v("?") > v("S") && v("S") > 0.0 && v("V") < 0.0 && v("Q") < v("V"));
+        // Order does not matter; seven tiles and nothing are not leaves.
+        assert_eq!(v("ERS"), v("SER"));
         assert!(lv.value(&[]).is_none());
-
-        // Order of tiles must not matter.
-        let a = lv.value(&[Tile::new('E'), Tile::new('R'), Tile::new('S')]);
-        let b = lv.value(&[Tile::new('S'), Tile::new('E'), Tile::new('R')]);
-        assert_eq!(a, b);
-        assert!(a.is_some());
-
-        // Synergy the per-letter heuristic cannot express: AEINRS is worth
-        // more than the sum of its parts would suggest relative to AEIINR.
-        let aeinrs = lv
-            .value(&"AEINRS".chars().map(Tile::new).collect::<Vec<_>>())
-            .unwrap();
-        let aeiinr = lv
-            .value(&"AEIINR".chars().map(Tile::new).collect::<Vec<_>>())
-            .unwrap();
-        assert!(aeinrs > aeiinr, "{aeinrs} vs {aeiinr}");
-
-        // Seven-tile leaves are not leaves.
         assert!(lv
             .value(&"AEINRST".chars().map(Tile::new).collect::<Vec<_>>())
             .is_none());
+        // Synergy beyond the letters: AEINRS beats AEIINR.
+        assert!(v("AEINRS") > v("AEIINR"));
     }
 
     #[test]
@@ -353,32 +284,62 @@ mod tests {
         assert!(bingo_probability(&blank) > 0.5);
         assert!(bingo_probability(&q) < 0.03);
         // Blank: roughly -4 points; Q: roughly +1.7; empty leave: exactly 0.
-        let c_blank = bingo_bonus_correction(&blank, 40);
-        let c_q = bingo_bonus_correction(&q, 40);
+        let c_blank = bingo_bonus_correction(&blank, 50, 40);
+        let c_q = bingo_bonus_correction(&q, 50, 40);
         assert!((-4.5..-3.5).contains(&c_blank), "{c_blank}");
         assert!((1.4..2.0).contains(&c_q), "{c_q}");
-        assert_eq!(bingo_bonus_correction(&[], 40), 0.0);
+        assert_eq!(bingo_bonus_correction(&[], 50, 40), 0.0);
         // Under Scrabble's own bonus there is nothing to correct.
-        assert_eq!(bingo_bonus_correction(&blank, 50), 0.0);
+        assert_eq!(bingo_bonus_correction(&blank, 50, 50), 0.0);
     }
 
     #[test]
     fn rejects_garbage() {
-        assert!(LeaveValues::parse(&[]).is_err());
-        assert!(LeaveValues::parse(&[1, 0, 0, 0]).is_err());
-        // A huge declared node count is rejected before any allocation.
-        assert!(LeaveValues::parse(&[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]).is_err());
-        // So is a huge declared value count.
-        let mut huge_values = vec![1, 0, 0, 0];
-        huge_values.extend_from_slice(&IS_END.to_le_bytes());
-        huge_values.extend_from_slice(&u32::MAX.to_le_bytes());
-        assert!(LeaveValues::parse(&huge_values).is_err());
-        // One node pointing at itself with an accepting bit: a cycle.
-        let mut bytes = vec![2, 0, 0, 0];
-        bytes.extend_from_slice(&(1u32 | IS_END).to_le_bytes()); // root -> node 1
-        bytes.extend_from_slice(&(1u32 | IS_END | ACCEPTS).to_le_bytes()); // node 1 -> itself
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&1.0f32.to_le_bytes());
-        assert!(LeaveValues::parse(&bytes).is_err());
+        assert!(LeaveValues::parse_rlv2(&[]).is_err());
+        assert!(LeaveValues::parse_rlv2(b"RLV1....").is_err());
+        let mut bytes = b"RLV2".to_vec();
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&[200u8; 27]); // implausible bag
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        assert!(LeaveValues::parse_rlv2(&bytes).is_err());
+    }
+
+    /// A trained table survives saving and loading as RLV2, to the
+    /// hundredth of a point, and corrupt files are refused.
+    #[test]
+    fn rlv2_round_trip() {
+        let dist = crate::rules::CROSSPLAY.distribution;
+        let keys = all_leave_keys(&dist);
+        let map: std::collections::HashMap<u32, f32> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, (i % 4001) as f32 / 37.0 - 50.0))
+            .collect();
+        let table = LeaveValues::from_table(map.clone(), 40);
+        let path = std::env::temp_dir().join(format!("ravyn-rlv2-{}.rlv", std::process::id()));
+        table.save(&path, &dist).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(bytes.len(), 39 + keys.len() * 2);
+        let back = LeaveValues::parse_rlv2(&bytes).unwrap();
+        assert_eq!(back.fitted_bingo_bonus(), 40);
+        assert_eq!(back.len(), map.len());
+        for (k, v) in map.iter().take(5000) {
+            let got = back.value_of_codes(&codes_of_key(*k)).unwrap();
+            assert!((got - v).abs() <= 0.005 + 1e-6, "{k}: {got} vs {v}");
+        }
+        assert!(LeaveValues::parse_rlv2(&bytes[..bytes.len() - 1]).is_err());
+        assert!(LeaveValues::parse_rlv2(b"RLV2").is_err());
+    }
+
+    /// Sorted tile codes of a leave key (test helper).
+    fn codes_of_key(mut key: u32) -> Vec<u8> {
+        let mut codes = Vec::new();
+        while key != 0 {
+            codes.push((key & 31) as u8 - 1);
+            key >>= 5;
+        }
+        codes.reverse();
+        codes
     }
 }

@@ -212,7 +212,7 @@ proptest! {
     /// (a stable-Rust stand-in for `cargo fuzz`, which needs nightly).
     #[test]
     fn parsers_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..256), text in "\\PC{0,120}") {
-        let _ = ravyn::leaves::LeaveValues::parse(&bytes);
+        let _ = ravyn::leaves::LeaveValues::parse_rlv2(&bytes);
         if let Ok(state) = SolverState::from_cgp(&text) {
             let cgp = state.to_cgp((0, 0));
             let again = SolverState::from_cgp(&cgp).expect("own CGP parses");

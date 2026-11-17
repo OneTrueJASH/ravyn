@@ -11,7 +11,7 @@ use crate::leaves::LeaveValues;
 /// The word graph, relative to the data root.
 pub const WORDS_FST: &str = "data/words.fst";
 /// The leave table, relative to the data root.
-pub const LEAVES_KLV2: &str = "external/refengine/data/lexica/AMERICAN.klv2";
+pub const LEAVES: &str = "data/leaves.rlv";
 
 /// The data root: the workspace root, two levels above this crate.
 pub fn root() -> PathBuf {
@@ -52,7 +52,7 @@ pub fn dictionary() -> Option<Dictionary> {
             return None;
         }
     };
-    let leaves = root().join(LEAVES_KLV2);
+    let leaves = root().join(LEAVES);
     if leaves.exists() && !is_lfs_pointer(&leaves) {
         if let Ok(table) = LeaveValues::load(&leaves) {
             return Some(dict.with_leaves(table));

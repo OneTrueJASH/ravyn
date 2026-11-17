@@ -19,6 +19,7 @@ pub mod dictionary;
 pub mod endgame;
 pub mod game;
 pub mod inference;
+pub mod leavegen;
 pub mod leaves;
 pub mod mcts;
 pub mod negamax;

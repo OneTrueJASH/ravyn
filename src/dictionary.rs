@@ -127,7 +127,7 @@ pub struct Dictionary {
     /// The same words as a flat graph for the move generator.
     dawg: Dawg,
     word_count: usize,
-    /// Leave values from RefEngine's table, when the file was found.
+    /// Trained leave values (`data/leaves.rlv`), when the file was found.
     leaves: Option<LeaveValues>,
     /// How leave values are weighted by game phase.
     phase: PhaseScaling,
@@ -289,29 +289,9 @@ impl Dictionary {
     /// three-blank leave fell back to the per-letter heuristic, on a
     /// different scale from every other leave.
     fn table_value(&self, table: &LeaveValues, leave: &[Tile]) -> Option<f32> {
-        let correction = bingo_bonus_correction(leave, self.bingo_bonus);
-        if let Some(v) = table.value(leave) {
-            return Some(v + correction);
-        }
-        let blanks = leave.iter().filter(|t| t.is_blank).count();
-        if blanks <= 2 {
-            return None;
-        }
-        let mut reduced = Vec::with_capacity(leave.len());
-        let mut kept_blanks = 0;
-        for t in leave {
-            if t.is_blank {
-                if kept_blanks == 2 {
-                    continue;
-                }
-                kept_blanks += 1;
-            }
-            reduced.push(*t);
-        }
-        let base = table.value(&reduced)?;
-        let one = table.value(&[Tile::blank(' ')])?;
-        let two = table.value(&[Tile::blank(' '), Tile::blank(' ')])?;
-        Some(base + (blanks - 2) as f32 * (two - one) + correction)
+        let correction =
+            bingo_bonus_correction(leave, table.fitted_bingo_bonus(), self.bingo_bonus);
+        table.value(leave).map(|v| v + correction)
     }
 
     /// Check if a word is valid
@@ -391,7 +371,7 @@ pub fn phase_scale(unseen: Option<usize>) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::PhaseScaling;
-    use crate::test_data::{self, LEAVES_KLV2};
+    use crate::test_data::{self, LEAVES};
 
     #[test]
     fn test_load_dictionary() {
@@ -401,7 +381,7 @@ mod tests {
         assert!(dict.len() > 100000);
         // The leave table is attached whenever the real file is present
         // (an LFS pointer stub falls back to heuristic leaves).
-        let klv_real = test_data::file(LEAVES_KLV2).is_some();
+        let klv_real = test_data::file(LEAVES).is_some();
         assert_eq!(dict.has_leave_table(), klv_real);
     }
 
