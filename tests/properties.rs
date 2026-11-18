@@ -235,3 +235,67 @@ proptest! {
         }
     }
 }
+
+/// Lines a GCG file might hold, valid and not: pragmas, notes, every kind
+/// of event, and junk.
+fn gcg_line() -> impl Strategy<Value = String> {
+    let nick = prop::sample::select(vec!["a", "b", "c", "x:y", ""]);
+    let rack = prop::sample::select(vec!["", "AEINRST", "?b", "QQQQQQQQ", "ab?"]);
+    let mv = prop::sample::select(vec![
+        "8D CAT",
+        "H8 c.T",
+        "15O A",
+        "8D QU(I)Z",
+        "8D (A)",
+        "P1 X",
+        "-",
+        "--",
+        "-ABC",
+        "-3",
+        "(challenge)",
+        "(time)",
+        "(EE)",
+        "(e1)",
+        "8D",
+        "x y z",
+    ]);
+    let score = prop::sample::select(vec!["+5", "-7", "+0", "12", "++3", "x"]);
+    let total = prop::sample::select(vec!["0", "5", "-2", "+9", "y"]);
+    prop_oneof![
+        (nick.clone(), rack, mv, score, total)
+            .prop_map(|(n, r, m, s, t)| format!(">{n}: {r} {m} {s} {t}")),
+        (prop::sample::select(vec!["player1", "player2"]), nick)
+            .prop_map(|(p, n)| format!("#{p} {n} Some Name")),
+        prop::sample::select(vec![
+            "#note a note".to_string(),
+            "#note".to_string(),
+            "continuation  text ".to_string(),
+            "#lexicon CSW24".to_string(),
+            "#".to_string(),
+            String::new(),
+            "#character-encoding UTF-8".to_string(),
+        ]),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// Whatever parses writes back as GCG that parses to the same game,
+    /// and replays without panicking.
+    #[test]
+    fn gcg_round_trips(lines in prop::collection::vec(gcg_line(), 0..12)) {
+        let text = lines.join("\n");
+        if let Ok(game) = ravyn::gcg::Game::parse(&text) {
+            let written = game.to_gcg();
+            let again = ravyn::gcg::Game::parse(&written);
+            prop_assert!(again.is_ok(), "{text:?} wrote {written:?}: {again:?}");
+            let strip = |mut g: ravyn::gcg::Game| {
+                g.events.iter_mut().for_each(|e| e.line = 0);
+                g
+            };
+            prop_assert_eq!(strip(again.unwrap()), strip(game.clone()), "{}", written);
+            let _ = game.replay(&CROSSPLAY);
+        }
+    }
+}

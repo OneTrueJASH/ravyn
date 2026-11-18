@@ -28,3 +28,10 @@ path = "fuzz_targets/from_cgp.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "gcg_parse"
+path = "fuzz_targets/gcg_parse.rs"
+test = false
+doc = false
+bench = false

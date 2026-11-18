@@ -23,6 +23,8 @@ behind the leader's.
 - **Exact pre-endgame** with one tile in the bag (Crossplay), the pass
   included
 - **Rules as data**: `rules::CROSSPLAY` and `rules::SCRABBLE`
+- **Game records (GCG)**: read, write and replay them, and review a game
+  move by move against the engine's best
 
 ## Command line
 
@@ -32,6 +34,7 @@ cargo run --release --bin ravyn -- --help
 ```
 
 Commands: `gen`, `sim`, `endgame`, `preendgame`, `infer` (on CGP positions),
+`gcg` (review a game record, or print one of its positions with `--at N`),
 `train-leaves` and `match` (leave tables). `--rules scrabble` switches rules.
 
 ## Data

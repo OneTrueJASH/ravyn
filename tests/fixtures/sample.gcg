@@ -1,0 +1,12 @@
+#character-encoding UTF-8
+#player1 alice Alice
+#player2 sam Sam
+#note A short game for the GCG tests.
+>alice: AEINRST 8D NASTIER +58 58
+>sam: DEHLOOW H4 HOWD.E +36 36
+#note WOOLSHED was there.
+>alice: EIOUUVY -UUV +0 58
+>sam: ?ELORTZ - +0 36
+>alice: EIOYKNT 4F TO.KY +16 74
+>alice: EIOYKNT -- -16 58
+>sam: (challenge) +5 41

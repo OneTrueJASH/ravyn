@@ -223,3 +223,36 @@ fn scrabble_endgame_is_searched_to_the_end() {
     ]));
     assert!(out.starts_with("solved exactly"), "{out}");
 }
+
+#[test]
+fn gcg_reviews_a_game_and_prints_its_positions() {
+    let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.gcg");
+
+    // The position before event 5 needs no word list.
+    let at = stdout(&ravyn(&["gcg", file, "--at", "5"]));
+    assert_eq!(
+        at.trim(),
+        "15/15/15/7H7/7O7/7W7/7D7/3NASTIER5/7E7/15/15/15/15/15/15 EIOYKNT/ 58/36 0"
+    );
+
+    if common::dictionary().is_none() {
+        return;
+    }
+    let out = stdout(&ravyn(&["gcg", file]));
+    let row = |n: &str| {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(n))
+            .unwrap_or_else(|| panic!("no event {n} in\n{out}"))
+            .to_string()
+    };
+    assert!(row("1 ").contains("8D NASTIER"), "{out}");
+    assert!(row("2 ").contains("F4 WOOLSHED"), "{out}");
+    assert!(row("3 ").contains("exch UUV"), "{out}");
+    assert!(row("4 ").contains("pass"), "{out}");
+    assert!(row("5 ").contains("not in word list"), "{out}");
+    assert!(out.contains("alice: 58 points; 3 moves reviewed"), "{out}");
+    assert!(
+        out.contains("sam: 41 points; 2 moves reviewed, 0 the engine's best"),
+        "{out}"
+    );
+}

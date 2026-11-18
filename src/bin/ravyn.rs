@@ -13,10 +13,11 @@ use std::time::Duration;
 use ravyn::dictionary::Dictionary;
 use ravyn::endgame::{EndgameSolver, FinalTurn};
 use ravyn::game::SolverState;
+use ravyn::gcg::{self, Action, Game};
 use ravyn::inference::{infer_leave, InferenceSettings};
 use ravyn::leavegen::{train_generation, TrainingSettings};
 use ravyn::leaves::LeaveValues;
-use ravyn::mcts::{self_play_match, MatchEngine, SimChoice};
+use ravyn::mcts::{self_play_match_with_progress, MatchEngine, MatchResult, SimChoice};
 use ravyn::negamax::{solve_go_out, GoOutSettings};
 use ravyn::preendgame::solve_one_in_bag;
 use ravyn::rules::{Ending, Rules, CROSSPLAY, SCRABBLE};
@@ -30,6 +31,7 @@ ravyn: the RAVYN crossword-game engine
 usage: ravyn <command> '<CGP>' [options]
        ravyn train-leaves [--games N] [--generations G] [--out FILE] [--from FILE]
        ravyn match --a FILE --b FILE [--pairs N]
+       ravyn gcg FILE [--at N]
 
 commands:
   gen         every play, exchange and pass, best static equity first
@@ -44,6 +46,10 @@ commands:
               each playing with the last one's values (the first with
               --from, or the per-letter heuristic); saves to --out
               (default leaves.rlv) after every generation
+  gcg         review a game record (GCG): each move whose rack is
+              recorded against the best by static equity, and the
+              equity each player gave up; --at N prints the position
+              before event N as CGP instead (for sim, endgame, ...)
   match       self-play match between two leave tables (--a, --b: a
               leave table file, or `none` for the heuristic): A's score and
               mean spread over --pairs paired games (default 1000);
@@ -62,6 +68,7 @@ options:
   --games N       train-leaves: games per generation (default 200000)
   --generations G train-leaves: generations (default 3)
   --seed S        train-leaves and match: seed (default 1)
+  --at N          gcg: the position before event N (1 = the first move)
   --data DIR      directory holding data/words.fst and data/leaves.rlv
                   (default:
                   $RAVYN_DATA, then the current directory)
@@ -69,8 +76,9 @@ options:
 CGP: BOARD RACK[/OPP] [OURS/THEIRS ...], e.g.
   ravyn gen '15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 AEINRST/ 0/0 0'";
 
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 8] = [
     "gen",
+    "gcg",
     "sim",
     "endgame",
     "preendgame",
@@ -118,6 +126,8 @@ struct Options {
     pairs: usize,
     /// match: both sides choose moves by simulation (candidates, playouts).
     sim: Option<SimChoice>,
+    /// gcg: print the position before this event (1-based).
+    at: Option<usize>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -142,6 +152,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         b: None,
         pairs: 1000,
         sim: None,
+        at: None,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -168,6 +179,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 o.generations = number("--generations", value("--generations")?)? as usize
             }
             "--seed" => o.seed = number("--seed", value("--seed")?)?,
+            "--at" => o.at = Some(number("--at", value("--at")?)? as usize),
             "--pairs" => o.pairs = number("--pairs", value("--pairs")?)? as usize,
             "--out" => o.out = PathBuf::from(value("--out")?),
             "--from" => o.from = Some(PathBuf::from(value("--from")?)),
@@ -212,7 +224,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             COMMANDS.join(", ")
         ));
     }
-    if !NO_POSITION.contains(&o.command.as_str()) {
+    if o.command == "gcg" {
+        o.cgp = positional.next().ok_or("missing the GCG file")?;
+    } else if !NO_POSITION.contains(&o.command.as_str()) {
         o.cgp = positional.next().ok_or("missing the position (CGP)")?;
     }
     if let Some(extra) = positional.next() {
@@ -313,6 +327,7 @@ fn run(args: &[String]) -> Result<(), String> {
     match o.command.as_str() {
         "train-leaves" => return train_leaves(&o),
         "match" => return leave_match(&o),
+        "gcg" => return review_game(&o),
         _ => {}
     }
     let state = SolverState::from_cgp_with_rules(&o.cgp, o.rules)?;
@@ -674,7 +689,15 @@ fn leave_match(o: &Options) -> Result<(), String> {
         sim: o.sim,
     };
     let started = std::time::Instant::now();
-    let r = self_play_match(&engine(a, &da), &engine(b, &db), o.pairs.max(1), o.seed);
+    let reporter = Progress::new(o.pairs.max(1) * 2);
+    let r = self_play_match_with_progress(
+        &engine(a, &da),
+        &engine(b, &db),
+        o.pairs.max(1),
+        o.seed,
+        &|r| reporter.update(r),
+    );
+    reporter.finish();
     println!(
         "{a} vs {b}: {} games in {:.0}s; A scores {:.3} +- {:.3}, spread {:+.2} +- {:.2} per game",
         r.games,
@@ -685,4 +708,201 @@ fn leave_match(o: &Options) -> Result<(), String> {
         r.spread_ci95
     );
     Ok(())
+}
+
+/// Review a GCG game record, or print one of its positions.
+fn review_game(o: &Options) -> Result<(), String> {
+    let path = Path::new(&o.cgp);
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let game = Game::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let replay = game
+        .replay(o.rules)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    for w in &replay.warnings {
+        eprintln!("ravyn: {}: {w}", path.display());
+    }
+    let nick = |p: usize| game.players[p].nick.as_str();
+
+    if let Some(at) = o.at {
+        if at == 0 || at > game.events.len() + 1 {
+            return Err(format!(
+                "--at: events run from 1 to {} ({} for the final position)",
+                game.events.len(),
+                game.events.len() + 1
+            ));
+        }
+        let index = at - 1;
+        // The side to move, its rack when recorded, and the scores with
+        // the mover's first.
+        let (mover, rack) = match game.events.get(index) {
+            Some(e) => (e.player, e.rack.clone()),
+            None => (
+                game.events.last().map_or(0, |e| 1 - e.player),
+                String::new(),
+            ),
+        };
+        let scores = game.scores_before(index);
+        let state = SolverState {
+            board: replay.boards[index].clone(),
+            ..SolverState::new()
+        };
+        println!(
+            "{} {}/ {}/{} 0",
+            state.board_cgp(),
+            rack,
+            scores[mover],
+            scores[1 - mover]
+        );
+        eprintln!("{} to move", nick(mover));
+        return Ok(());
+    }
+
+    let dict = load_dictionary(o.data.as_deref())?.for_rules(o.rules);
+    let (reviews, skipped) = gcg::review(&game, &replay, &dict);
+    for e in &skipped {
+        eprintln!("ravyn: {}: {e}; not reviewed", path.display());
+    }
+    println!(
+        "{:>3} {:<10} {:<22} {:>5} {:>7}  {:<22} {:>7} {:>6}",
+        "#", "player", "played", "score", "equity", "best", "equity", "lost"
+    );
+    let mut lost = [0.0f32; 2];
+    let mut reviewed = [0usize; 2];
+    let mut matched = [0usize; 2];
+    for r in &reviews {
+        let mut flags = String::new();
+        if r.unknown_word {
+            flags.push_str("  not in word list");
+        }
+        if let Some(s) = r.rescored {
+            flags.push_str(&format!("  (engine scores it {s})"));
+        }
+        if r.bag == 0 {
+            flags.push_str("  bag empty: static only");
+        }
+        let same = r.loss.abs() < 1e-3;
+        println!(
+            "{:>3} {:<10} {:<22} {:>5} {:>7.2}  {:<22} {:>7.2} {:>6}{}",
+            r.event + 1,
+            nick(r.player),
+            label(&r.played),
+            r.played.score,
+            r.played.equity,
+            if same {
+                "=".to_string()
+            } else {
+                label(&r.best)
+            },
+            r.best.equity,
+            if same {
+                "-".to_string()
+            } else {
+                format!("{:.2}", r.loss)
+            },
+            flags
+        );
+        lost[r.player] += r.loss.max(0.0);
+        reviewed[r.player] += 1;
+        matched[r.player] += usize::from(same);
+    }
+    let finals = game.scores_before(game.events.len());
+    for p in 0..2 {
+        if reviewed[p] == 0 {
+            continue;
+        }
+        println!(
+            "{}: {} points; {} moves reviewed, {} the engine's best, {:.1} equity given up ({:.2} a move)",
+            nick(p),
+            finals[p],
+            reviewed[p],
+            matched[p],
+            lost[p],
+            lost[p] / reviewed[p] as f32
+        );
+    }
+    let unreviewed = game
+        .events
+        .iter()
+        .filter(|e| {
+            e.rack.is_empty()
+                && matches!(
+                    e.action,
+                    Action::Play(_) | Action::Exchange(_) | Action::Pass
+                )
+        })
+        .count();
+    if unreviewed > 0 {
+        println!("{unreviewed} moves have no recorded rack and were not reviewed");
+    }
+    Ok(())
+}
+
+/// Progress of a long match on stderr: one line rewritten in place on a
+/// terminal, a line every minute otherwise.
+struct Progress {
+    total: usize,
+    started: std::time::Instant,
+    tty: bool,
+    /// When the last line was printed (the start, before any), and whether
+    /// one has been.
+    last: std::sync::Mutex<(std::time::Instant, bool)>,
+}
+
+impl Progress {
+    fn new(total: usize) -> Self {
+        use std::io::IsTerminal;
+        let now = std::time::Instant::now();
+        Progress {
+            total,
+            started: now,
+            tty: std::io::stderr().is_terminal(),
+            last: std::sync::Mutex::new((now, false)),
+        }
+    }
+
+    fn update(&self, r: &MatchResult) {
+        let every = Duration::from_secs(if self.tty { 1 } else { 60 });
+        let Ok(mut last) = self.last.lock() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if now - last.0 < every || r.games >= self.total {
+            return;
+        }
+        *last = (now, true);
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let left = elapsed * (self.total - r.games) as f64 / r.games.max(1) as f64;
+        let line = format!(
+            "{}/{} games, {} elapsed, ~{} left; A scores {:.3} +- {:.3}, spread {:+.2} +- {:.2}",
+            r.games,
+            self.total,
+            clock(elapsed),
+            clock(left),
+            r.score,
+            r.score_ci95,
+            r.spread,
+            r.spread_ci95
+        );
+        if self.tty {
+            eprint!("\r\x1b[2K{line}");
+        } else {
+            eprintln!("{line}");
+        }
+    }
+
+    fn finish(&self) {
+        if self.tty && self.last.lock().is_ok_and(|l| l.1) {
+            eprint!("\r\x1b[2K");
+        }
+    }
+}
+
+/// `1h02m`, `3m05s` or `12s`.
+fn clock(seconds: f64) -> String {
+    let s = seconds.round() as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+    }
 }

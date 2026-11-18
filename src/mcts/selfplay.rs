@@ -1,5 +1,7 @@
 //! Engine-versus-engine self-play matches (`examples/selfplay.rs`).
 
+use std::sync::Mutex;
+
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::dictionary::Dictionary;
@@ -41,6 +43,20 @@ pub struct MatchResult {
 /// alternates between pairs. Pairs are the unit of the confidence
 /// intervals, which removes most of the luck of the draw.
 pub fn self_play_match(a: &MatchEngine, b: &MatchEngine, pairs: usize, seed: u64) -> MatchResult {
+    self_play_match_with_progress(a, b, pairs, seed, &|_| {})
+}
+
+/// [`self_play_match`], calling `progress` with the running result after
+/// every finished pair (from whichever worker finished it, one call at a
+/// time). The final result is the same as without it.
+pub fn self_play_match_with_progress(
+    a: &MatchEngine,
+    b: &MatchEngine,
+    pairs: usize,
+    seed: u64,
+    progress: &(dyn Fn(&MatchResult) + Sync),
+) -> MatchResult {
+    let running = Mutex::new(Running::default());
     let outcome = |spread: i32| match spread.cmp(&0) {
         std::cmp::Ordering::Greater => 1.0,
         std::cmp::Ordering::Less => 0.0,
@@ -60,10 +76,15 @@ pub fn self_play_match(a: &MatchEngine, b: &MatchEngine, pairs: usize, seed: u64
             };
             let a_first_rack = play(a, b);
             let b_first_rack = -play(b, a);
-            (
+            let pair = (
                 (outcome(a_first_rack) + outcome(b_first_rack)) / 2.0,
                 (a_first_rack + b_first_rack) as f64 / 2.0,
-            )
+            );
+            if let Ok(mut r) = running.lock() {
+                r.add(pair);
+                progress(&r.result());
+            }
+            pair
         })
         .collect();
     let mean_ci = |v: &mut dyn Iterator<Item = f64>| {
@@ -81,5 +102,61 @@ pub fn self_play_match(a: &MatchEngine, b: &MatchEngine, pairs: usize, seed: u64
         score_ci95,
         spread,
         spread_ci95,
+    }
+}
+
+/// Running sums of finished pairs, for progress reports.
+#[derive(Default)]
+struct Running {
+    n: f64,
+    score: (f64, f64),
+    spread: (f64, f64),
+}
+
+impl Running {
+    fn add(&mut self, (score, spread): (f64, f64)) {
+        self.n += 1.0;
+        self.score.0 += score;
+        self.score.1 += score * score;
+        self.spread.0 += spread;
+        self.spread.1 += spread * spread;
+    }
+
+    fn result(&self) -> MatchResult {
+        let n = self.n.max(1.0);
+        let mean_ci = |(sum, sq): (f64, f64)| {
+            let mean = sum / n;
+            let var = ((sq - n * mean * mean) / (n - 1.0).max(1.0)).max(0.0);
+            (mean, 1.96 * (var / n).sqrt())
+        };
+        let (score, score_ci95) = mean_ci(self.score);
+        let (spread, spread_ci95) = mean_ci(self.spread);
+        MatchResult {
+            games: self.n as usize * 2,
+            score,
+            score_ci95,
+            spread,
+            spread_ci95,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn running_sums_match_the_batch_statistics() {
+        let pairs = [(1.0, 12.0), (0.5, -3.0), (0.0, -20.0), (1.0, 7.5)];
+        let mut r = Running::default();
+        pairs.iter().for_each(|&p| r.add(p));
+        let got = r.result();
+        let n = pairs.len() as f64;
+        let mean = pairs.iter().map(|p| p.1).sum::<f64>() / n;
+        let var = pairs.iter().map(|p| (p.1 - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        assert_eq!(got.games, 8);
+        assert!((got.spread - mean).abs() < 1e-9);
+        assert!((got.spread_ci95 - 1.96 * (var / n).sqrt()).abs() < 1e-9);
+        assert!((got.score - 0.625).abs() < 1e-9);
     }
 }

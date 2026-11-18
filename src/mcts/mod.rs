@@ -41,4 +41,4 @@ pub(crate) use playout::{win_value, PlayoutRecord};
 pub use playout::{SimChoice, TracePoint};
 pub(crate) use pool::Fnv;
 pub use pool::{position_fingerprint, TilePool};
-pub use selfplay::{self_play_match, MatchEngine, MatchResult};
+pub use selfplay::{self_play_match, self_play_match_with_progress, MatchEngine, MatchResult};
