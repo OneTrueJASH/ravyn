@@ -64,7 +64,7 @@ cargo test --release
 cargo bench --bench engine
 ```
 
-RAVYN is developed inside [cpsolver2](https://github.com/OneTrueJASH/cpsolver2)
+RAVYN is developed inside [RAVYL](https://github.com/OneTrueJASH/ravyl)
 (`crates/ravyn`), its first user, and synced here; until this repository is
 public, changes are made there.
 

@@ -2,14 +2,18 @@
 //! values) into a data directory, as RefEngine fetches a separate data repository. They live
 //! in their own repository, not in the engine's source or crate.
 //!
-//! Each data version is a directory `v<YYYYMMDD>/` holding the files and a
-//! `SHA256SUMS`; nothing is installed unless its checksum matches, and each
-//! file is written to a temporary name and renamed into place. Downloads go
-//! through `curl` (on macOS, Linux and Windows 10 and later), keeping the
-//! engine free of an HTTP stack.
+//! Each data version is a directory `v<YYYYMMDD>/` holding the files. Their
+//! SHA-256 checksums are built into this program ([`FILES`]), so nothing is
+//! installed unless it is exactly the file this version of the engine was
+//! made with, whoever controls the source; each file is written to a
+//! temporary name and renamed into place. Downloads go through `curl` (on
+//! macOS, Linux and Windows 10 and later), keeping the engine free of an
+//! HTTP stack; a token is handed to it on its standard input, never on its
+//! command line, where other programs could read it.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// The data version this build of the engine uses.
 pub const DATA_VERSION: &str = "20261118";
@@ -18,8 +22,22 @@ pub const DATA_VERSION: &str = "20261118";
 /// repository (`$RAVYN_DATA_URL` overrides it).
 const DEFAULT_SOURCE: &str = "https://api.github.com/repos/OneTrueJASH/ravyn-data/contents";
 
-/// The files of a data version, installed under `<root>/data/`.
-pub const FILES: [&str; 3] = ["words.fst", "leaves.rlv", "crossplay-removed.txt"];
+/// The files of the data version, installed under `<root>/data/`, with
+/// their SHA-256 checksums.
+pub const FILES: [(&str, &str); 3] = [
+    (
+        "words.fst",
+        "7df3ad5c099fcaa1d10112855656f6d87732bc64adf07e23bb722686d5d41da5",
+    ),
+    (
+        "leaves.rlv",
+        "ead8de54d2b05038eebdcaf585b6d4f01423ed109c98168c54a366ecb5216ec0",
+    ),
+    (
+        "crossplay-removed.txt",
+        "81639bd55ea4e48d856a3681ee96bc95425a5cb3fe48fac2c41088c02cc54d35",
+    ),
+];
 
 /// The default data root: `~/.ravyn` (the files go in `~/.ravyn/data`).
 pub fn default_root() -> Option<PathBuf> {
@@ -41,22 +59,39 @@ fn token() -> Option<String> {
     (out.status.success() && !t.trim().is_empty()).then(|| t.trim().to_string())
 }
 
+/// What curl reads on its standard input (`--config -`): the headers, the
+/// token among them, so the token never appears on a command line.
+fn curl_config(token: Option<&str>) -> Result<String, String> {
+    let mut config = String::from("header = \"Accept: application/vnd.github.raw\"\n");
+    if let Some(t) = token {
+        if t.chars().any(|c| c == '"' || c == '\\' || c.is_control()) {
+            return Err("the token holds characters no token has".into());
+        }
+        config.push_str(&format!("header = \"Authorization: Bearer {t}\"\n"));
+    }
+    Ok(config)
+}
+
 /// Download `name` of the data version into `to`.
 fn download(source: &str, token: Option<&str>, name: &str, to: &Path) -> Result<(), String> {
     let url = format!("{source}/v{DATA_VERSION}/{name}");
-    let mut curl = Command::new("curl");
-    curl.args(["--fail", "--silent", "--show-error", "--location"])
-        .args(["--header", "Accept: application/vnd.github.raw"])
-        .arg("--output")
-        .arg(to);
-    if let Some(t) = token {
-        curl.arg("--header")
-            .arg(format!("Authorization: Bearer {t}"));
-    }
-    let out = curl
+    let config = curl_config(token)?;
+    let mut child = Command::new("curl")
+        .args(["--fail", "--silent", "--show-error", "--location"])
+        .args(["--config", "-", "--output"])
+        .arg(to)
         .arg(&url)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("could not run curl ({e}); install it or copy the files by hand"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(config.as_bytes())
+            .map_err(|e| format!("curl: {e}"))?;
+    }
+    let out = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
         let why = String::from_utf8_lossy(&out.stderr);
         let hint = if why.contains("404") || why.contains("401") || why.contains("403") {
@@ -70,51 +105,40 @@ fn download(source: &str, token: Option<&str>, name: &str, to: &Path) -> Result<
     Ok(())
 }
 
-/// The checksums listed in a `SHA256SUMS` file, by file name.
-fn parse_sums(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|l| {
-            let (hash, name) = l.split_once(char::is_whitespace)?;
-            let name = name.trim().trim_start_matches('*');
-            (hash.len() == 64).then(|| (name.to_string(), hash.to_ascii_lowercase()))
-        })
-        .collect()
-}
-
-/// Fetch the data version into `<root>/data/`, verifying every file.
+/// Fetch the data version into `<root>/data/`, verifying every file
+/// against the checksum built into this program.
 pub fn fetch(root: &Path) -> Result<(), String> {
     let source = std::env::var("RAVYN_DATA_URL").unwrap_or_else(|_| DEFAULT_SOURCE.to_string());
     let token = token();
     let dir = root.join("data");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let sums_path = dir.join(".SHA256SUMS.download");
-    download(&source, token.as_deref(), "SHA256SUMS", &sums_path)?;
-    let sums = std::fs::read_to_string(&sums_path).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&sums_path);
-    let sums = parse_sums(&sums);
-    for name in FILES {
-        let want = sums
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, h)| h.clone())
-            .ok_or_else(|| format!("SHA256SUMS of v{DATA_VERSION} does not list {name}"))?;
+    for (name, want) in FILES {
         let target = dir.join(name);
         if std::fs::read(&target).is_ok_and(|bytes| sha256_hex(&bytes) == want) {
             println!("{name}: up to date");
             continue;
         }
         let temp = dir.join(format!(".{name}.download"));
-        download(&source, token.as_deref(), name, &temp)?;
-        let bytes = std::fs::read(&temp).map_err(|e| e.to_string())?;
-        let got = sha256_hex(&bytes);
-        if got != want {
-            let _ = std::fs::remove_file(&temp);
-            return Err(format!(
-                "{name}: checksum {got}, expected {want}; nothing installed"
-            ));
-        }
+        let fetched = download(&source, token.as_deref(), name, &temp).and_then(|()| {
+            let bytes = std::fs::read(&temp).map_err(|e| e.to_string())?;
+            let got = sha256_hex(&bytes);
+            if got == want {
+                Ok(bytes.len())
+            } else {
+                Err(format!(
+                    "{name}: checksum {got}, expected {want}; nothing installed"
+                ))
+            }
+        });
+        let size = match fetched {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
+        };
         std::fs::rename(&temp, &target).map_err(|e| format!("{}: {e}", target.display()))?;
-        println!("{name}: {} bytes, checksum verified", bytes.len());
+        println!("{name}: {size} bytes, checksum verified");
     }
     println!("data v{DATA_VERSION} in {}", dir.display());
     Ok(())
@@ -190,6 +214,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_token_stays_off_the_command_line() {
+        let config = curl_config(Some("ghp_abc123")).unwrap();
+        assert!(config.contains("Authorization: Bearer ghp_abc123"));
+        assert!(curl_config(None).unwrap().lines().count() == 1);
+        // Nothing that could break out of the quoted header.
+        assert!(curl_config(Some("a\"b")).is_err());
+        assert!(curl_config(Some("a\nheader = x")).is_err());
+    }
+
+    #[test]
+    fn built_in_checksums_are_well_formed() {
+        for (name, sum) in FILES {
+            assert_eq!(sum.len(), 64, "{name}");
+            assert!(sum
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        }
+    }
+
+    #[test]
     fn sha256_matches_the_standard_vectors() {
         assert_eq!(
             sha256_hex(b""),
@@ -208,16 +252,5 @@ mod tests {
             sha256_hex(&vec![b'a'; 1_000_000]),
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
-    }
-
-    #[test]
-    fn checksum_lists_parse() {
-        let sums = parse_sums(
-            "7df3ad5c099fcaa1d10112855656f6d87732bc64adf07e23bb722686d5d41da5  words.fst\n\
-             ead8de54d2b05038eebdcaf585b6d4f01423ed109c98168c54a366ecb5216ec0 *leaves.rlv\n\
-             junk line\n",
-        );
-        assert_eq!(sums.len(), 2);
-        assert_eq!(sums[1].0, "leaves.rlv");
     }
 }

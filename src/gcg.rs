@@ -387,6 +387,15 @@ impl Game {
         for (index, raw) in text.lines().enumerate() {
             let line_no = index + 1;
             let line = raw.trim_end_matches('\r');
+            // Names, notes and pragmas end up on screen: a control
+            // character (an escape sequence, say) could drive the terminal
+            // that shows them, so a file holding one is refused.
+            if let Some(c) = line.chars().find(|&c| c.is_control() && c != '\t') {
+                return Err(GcgError::new(
+                    line_no,
+                    format!("control character {:?} in the file", c),
+                ));
+            }
             if let Some(pragma) = line.strip_prefix('#') {
                 let (name, value) = pragma
                     .split_once(char::is_whitespace)
@@ -994,6 +1003,23 @@ mod tests {
         assert_eq!(game.events[2].action, Action::TimePenalty);
         assert_eq!(game.events[3].action, Action::ExchangeCount(2));
         assert_eq!(game.players[1].nick, "b");
+    }
+
+    /// A file carrying terminal control sequences (here an OSC 52 clipboard
+    /// write in a player's name, and an escape in a note) is refused, so
+    /// they never reach the screen.
+    #[test]
+    fn control_characters_are_refused() {
+        for text in [
+            "#player1 a\u{1b}]52;c;ZWNobw==\u{7} A\n>a: AB 8D AB +4 4\n",
+            "#player1 a A\n>a: AB 8D AB +4 4\n#note \u{1b}[2J\n",
+            "#player1 a A\n>a: AB 8D AB +4 4\n#note plain\n\u{9b}31m\n",
+        ] {
+            let err = Game::parse(text).unwrap_err();
+            assert!(err.message.contains("control character"), "{err}");
+        }
+        // Tabs and Windows line ends are fine.
+        assert!(Game::parse("#player1\ta A\r\n>a: AB 8D AB +4 4\r\n").is_ok());
     }
 
     #[test]

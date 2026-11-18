@@ -1,1 +1,4 @@
 /target
+# The word list comes from the data repository (`ravyn fetch-data`).
+/data/words.fst
+/data/crossplay-removed.txt
