@@ -9,6 +9,11 @@ keywords = ["crossword", "word-game", "scrabble", "monte-carlo", "engine"]
 categories = ["games", "algorithms"]
 rust-version = "1.88"
 publish = false
+readme = "README.md"
+# The word list is not part of the package: it is fetched from the data
+# repository (`ravyn fetch-data`), as RefEngine fetches a separate data repository. The leave
+# values, RAVYN's own, ship with it.
+exclude = ["data/words.fst", "data/crossplay-removed.txt", "/wasm", "/fuzz"]
 
 [dependencies]
 anyhow = "1.0"

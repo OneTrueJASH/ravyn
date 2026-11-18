@@ -5,6 +5,8 @@
 //! lowercase letters for blanks; the rack with `?` for a blank, optionally
 //! followed by the opponent's rack when it is known; then the scores.
 
+mod fetch;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
@@ -32,6 +34,7 @@ usage: ravyn <command> '<CGP>' [options]
        ravyn train-leaves [--games N] [--generations G] [--out FILE] [--from FILE]
        ravyn match --a FILE --b FILE [--pairs N]
        ravyn gcg FILE [--at N]
+       ravyn fetch-data [--data DIR]
 
 commands:
   gen         every play, exchange and pass, best static equity first
@@ -51,6 +54,10 @@ commands:
               recorded against the best by static equity, and the
               equity each player gave up; --at N prints the position
               before event N as CGP instead (for sim, endgame, ...)
+  fetch-data  download the data files (word list, leave values) into
+              --data DIR, default ~/.ravyn, verifying their checksums;
+              while the data repository is private it needs a token:
+              $RAVYN_DATA_TOKEN, $GITHUB_TOKEN or `gh auth login`
   match       self-play match between two leave tables (--a, --b: a
               leave table file, or `none` for the heuristic): A's score and
               mean spread over --pairs paired games (default 1000);
@@ -72,13 +79,14 @@ options:
   --seed S        train-leaves and match: seed (default 1)
   --at N          gcg: the position before event N (1 = the first move)
   --data DIR      directory holding data/words.fst and data/leaves.rlv
-                  (default:
-                  $RAVYN_DATA, then the current directory)
+                  (default: $RAVYN_DATA, then the current directory if it
+                  has data/, then ~/.ravyn, where fetch-data puts them)
 
 CGP: BOARD RACK[/OPP] [OURS/THEIRS ...], e.g.
   ravyn gen '15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 AEINRST/ 0/0 0'";
 
-const COMMANDS: [&str; 8] = [
+const COMMANDS: [&str; 9] = [
+    "fetch-data",
     "gen",
     "gcg",
     "sim",
@@ -89,7 +97,7 @@ const COMMANDS: [&str; 8] = [
     "match",
 ];
 /// Commands that take no position.
-const NO_POSITION: [&str; 2] = ["train-leaves", "match"];
+const NO_POSITION: [&str; 3] = ["train-leaves", "match", "fetch-data"];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -284,9 +292,18 @@ fn unseen(state: &SolverState) -> Vec<Tile> {
         .collect()
 }
 
+/// The directory holding `data/`: `--data`, then `$RAVYN_DATA`, then the
+/// current directory if it has the word list, then `~/.ravyn` (where
+/// `fetch-data` puts it).
 fn data_root(dir: Option<&Path>) -> PathBuf {
     dir.map(Path::to_path_buf)
         .or_else(|| std::env::var_os("RAVYN_DATA").map(PathBuf::from))
+        .or_else(|| {
+            Path::new("data/words.fst")
+                .is_file()
+                .then(|| PathBuf::from("."))
+        })
+        .or_else(fetch::default_root)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -295,7 +312,7 @@ fn load_words(dir: Option<&Path>) -> Result<Dictionary, String> {
     let words = data_root(dir).join("data/words.fst");
     Dictionary::load_from_fst(&words).map_err(|e| {
         format!(
-            "{}: {e:#} (point --data at a directory holding data/)",
+            "{}: {e:#} (run `ravyn fetch-data`, or point --data at a directory holding data/)",
             words.display()
         )
     })
@@ -327,6 +344,13 @@ fn load_dictionary(dir: Option<&Path>) -> Result<Dictionary, String> {
 fn run(args: &[String]) -> Result<(), String> {
     let o = parse(args)?;
     match o.command.as_str() {
+        "fetch-data" => {
+            let root = match o.data.as_deref() {
+                Some(dir) => dir.to_path_buf(),
+                None => fetch::default_root().ok_or("no home directory: use --data DIR")?,
+            };
+            return fetch::fetch(&root);
+        }
         "train-leaves" => return train_leaves(&o),
         "match" => return leave_match(&o),
         "gcg" => return review_game(&o),

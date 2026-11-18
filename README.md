@@ -34,15 +34,26 @@ cargo run --release --bin ravyn -- gen '15/15/15/15/15/15/15/15/15/15/15/15/15/1
 cargo run --release --bin ravyn -- --help
 ```
 
-Commands: `gen`, `sim`, `endgame`, `preendgame`, `infer` (on CGP positions),
+Commands: `fetch-data` (the data files), `gen`, `sim`, `endgame`, `preendgame`, `infer` (on CGP positions),
 `gcg` (review a game record, or print one of its positions with `--at N`),
 `train-leaves` and `match` (leave tables). `--rules scrabble` switches rules.
 
 ## Data
 
-`data/words.fst` (the word list) and `data/leaves.rlv` (the trained leave
-values) are in the repository; tests, benchmarks and the CLI find them from
-the crate root (or `--data`, `$RAVYN_DATA`).
+The data files live in their own repository, versioned and checksummed,
+as RefEngine keeps its lexica in a separate data repository:
+
+```bash
+ravyn fetch-data        # into ~/.ravyn/data (or --data DIR)
+```
+
+It installs only files that match the published SHA-256 checksums. While
+the data repository is private it needs a token (`$RAVYN_DATA_TOKEN`,
+`$GITHUB_TOKEN`, or a `gh auth login`). The CLI looks for `data/` in
+`--data`, `$RAVYN_DATA`, the current directory, then `~/.ravyn`; tests and
+benchmarks use `data/` beside the crate when present. The crate package
+leaves out the word list; `data/leaves.rlv`, RAVYN's own trained leave
+values, ships with it.
 
 ## Development
 
