@@ -86,11 +86,13 @@ pub fn solve_one_in_bag(
     unseen: &[Tile],
     score_diff: i32,
     cancel: Option<&AtomicBool>,
+    deadline: Option<std::time::Instant>,
 ) -> Option<Vec<PreEndgameMove>> {
     if unseen.len() != RACK_SIZE + 1 || our_rack.is_empty() {
         return None;
     }
     let stopped = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    let expired = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
 
     // The distinct tiles that may be in the bag, with their probability.
     let mut cases: Vec<(Tile, usize)> = Vec::new();
@@ -147,7 +149,7 @@ pub fn solve_one_in_bag(
 
     // Caps: the opponent gets at least their top-scoring play or a pass,
     // each followed by our best final play.
-    let mut bounded: Vec<PreEndgameMove> = plays
+    let bounded: Vec<PreEndgameMove> = plays
         .into_par_iter()
         .map(|mv| {
             if stopped() {
@@ -173,70 +175,59 @@ pub fn solve_one_in_bag(
             Some(summarize(mv, values, false))
         })
         .collect::<Option<Vec<_>>>()?;
-    let rank = |a: &PreEndgameMove, b: &PreEndgameMove| {
-        b.win
-            .total_cmp(&a.win)
-            .then(b.spread.total_cmp(&a.spread))
-            .then(b.mv.score.cmp(&a.mv.score))
-    };
-    bounded.sort_by(rank);
-
-    // Solve from the highest cap down, a batch at a time, until no cap
-    // left can beat the best exact result.
-    let batch = rayon::current_num_threads().max(1) * 2;
     // The pass, solved exactly; as a known result it also prunes plays.
+    // A reply's value does not depend on the tile left in the bag (their
+    // rack after it is the unseen tiles less the reply's), so the cases
+    // share one cache, solved one after another (each in parallel) so
+    // that the later ones find what the earlier ones solved.
+    let pass_replies = ReplyCache::default();
     let pass_values = cases
-        .par_iter()
+        .iter()
         .map(|&(tile, _)| {
             if stopped() {
                 return None;
             }
             let theirs = remove(unseen, &[tile]);
             Some(pass_value(
-                &endgame, board, dictionary, our_rack, &theirs, tile, None,
+                &endgame,
+                board,
+                dictionary,
+                our_rack,
+                &theirs,
+                tile,
+                Some(&pass_replies),
             ))
         })
         .collect::<Option<Vec<i32>>>()?;
-    let mut solved: Vec<PreEndgameMove> = vec![summarize(Move::pass(our_rack), pass_values, true)];
-    let mut rest = bounded.into_iter().peekable();
-    loop {
-        if stopped() {
-            return None;
+    let pass = summarize(Move::pass(our_rack), pass_values, true);
+
+    // Everything a play's cases share: the board after it, its analysis,
+    // and the tiles we keep.
+    let prepare = |mv: &Move| {
+        let mut after = board.clone();
+        for (r, c, t) in &mv.tiles_used {
+            after.place_tile(*r, *c, *t);
         }
-        let best = solved.iter().min_by(|a, b| rank(a, b));
-        let can_beat =
-            |cap: &PreEndgameMove| best.is_none_or(|b| (cap.win, cap.spread) >= (b.win, b.spread));
-        let mut next = Vec::with_capacity(batch);
-        while next.len() < batch {
-            match rest.next_if(|cap| can_beat(cap)) {
-                Some(cap) => next.push(cap.mv),
-                None => break,
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        let exact: Vec<PreEndgameMove> = next
-            .into_par_iter()
-            .map(|mv| {
-                let values = cases
-                    .iter()
-                    .map(|&(tile, _)| {
-                        let (after, ours, theirs) = case(&mv, tile);
-                        mv.score as i32 - endgame.best_value(&after, &theirs, &ours)
-                    })
-                    .collect();
-                summarize(mv, values, true)
-            })
-            .collect();
-        solved.extend(exact);
-    }
-    if stopped() {
-        return None;
-    }
-    solved.sort_by(rank);
-    solved.extend(rest);
-    Some(solved)
+        let analysis = Solver::new(&after, dictionary).analysis();
+        (after, analysis, remove(our_rack, &mv.tiles_from_rack()))
+    };
+    let solve = |mv: &Move, p: &(Board, BoardAnalysis, Vec<Tile>), i: usize| {
+        let (after, analysis, kept) = p;
+        let tile = cases[i].0;
+        let mut ours = kept.clone();
+        ours.push(tile);
+        mv.score as i32 - endgame.best_value_with(after, analysis, &remove(unseen, &[tile]), &ours)
+    };
+    solve_from_caps(
+        bounded,
+        vec![pass],
+        score_diff,
+        &stopped,
+        &expired,
+        &prepare,
+        &|_, _, _| {},
+        &solve,
+    )
 }
 
 /// One way the last two tiles can leave the bag: a one-tile play draws
@@ -326,6 +317,111 @@ fn rank(a: &PreEndgameMove, b: &PreEndgameMove) -> std::cmp::Ordering {
         .total_cmp(&a.win)
         .then(b.spread.total_cmp(&a.spread))
         .then(b.mv.score.cmp(&a.mv.score))
+}
+
+/// Solve capped plays exactly, from the highest cap down; shared by both
+/// solvers. `solved` holds what is already solved (with one tile, the
+/// pass). With nothing solved yet, the most promising play goes first, its
+/// cases in parallel, so that the rest can be given up early. Then a batch
+/// at a time: `tighten` may lower a play's caps cheaply, and its cases are
+/// solved likeliest first with the caps standing in for the rest, giving
+/// the play up as soon as that mix cannot beat the best play so far.
+/// Solving stops when no cap left can beat the best result, or past the
+/// deadline (`expired`); unsolved plays keep their caps. `None` if
+/// `stopped`.
+#[allow(clippy::too_many_arguments)]
+fn solve_from_caps<P: Sync>(
+    mut bounded: Vec<PreEndgameMove>,
+    mut solved: Vec<PreEndgameMove>,
+    score_diff: i32,
+    stopped: &(dyn Fn() -> bool + Sync),
+    expired: &(dyn Fn() -> bool + Sync),
+    prepare: &(dyn Fn(&Move) -> P + Sync),
+    tighten: &(dyn Fn(&Move, &P, &mut [DrawOutcome]) + Sync),
+    solve: &(dyn Fn(&Move, &P, usize) -> i32 + Sync),
+) -> Option<Vec<PreEndgameMove>> {
+    bounded.sort_by(rank);
+    let batch = rayon::current_num_threads().max(1) * 2;
+    // Plays given up part way: their solved cases with caps for the rest,
+    // which already fell below the best play.
+    let mut abandoned: Vec<PreEndgameMove> = Vec::new();
+    let mut rest = bounded.into_iter().peekable();
+    loop {
+        if stopped() {
+            return None;
+        }
+        if expired() {
+            break;
+        }
+        let best = solved
+            .iter()
+            .min_by(|a, b| rank(a, b))
+            .map(|b| (b.win, b.spread));
+        let can_beat = |cap: &PreEndgameMove| best.is_none_or(|b| (cap.win, cap.spread) >= b);
+        let size = if best.is_some() { batch } else { 1 };
+        let mut next = Vec::with_capacity(size);
+        while next.len() < size {
+            match rest.next_if(|cap| can_beat(cap)) {
+                Some(cap) => next.push(cap),
+                None => break,
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        let results: Vec<PreEndgameMove> = next
+            .into_par_iter()
+            .map(|cap| {
+                let prep = prepare(&cap.mv);
+                let mut outcomes = cap.outcomes;
+                let Some(b) = best else {
+                    // Nothing to beat yet: solve every case, in parallel.
+                    let values: Vec<i32> = (0..outcomes.len())
+                        .into_par_iter()
+                        .map(|i| solve(&cap.mv, &prep, i))
+                        .collect();
+                    for (o, v) in outcomes.iter_mut().zip(values) {
+                        o.value = v;
+                    }
+                    return summarize(cap.mv, outcomes, true, score_diff);
+                };
+                let below = |outcomes: &[DrawOutcome]| {
+                    let mix = summarize(cap.mv.clone(), outcomes.to_vec(), false, score_diff);
+                    ((mix.win, mix.spread) < b).then_some(mix)
+                };
+                tighten(&cap.mv, &prep, &mut outcomes);
+                if let Some(mix) = below(&outcomes) {
+                    return mix;
+                }
+                let mut order: Vec<usize> = (0..outcomes.len()).collect();
+                order.sort_by(|&x, &y| outcomes[y].probability.total_cmp(&outcomes[x].probability));
+                for (done, &i) in order.iter().enumerate() {
+                    outcomes[i].value = solve(&cap.mv, &prep, i);
+                    if done + 1 < order.len() {
+                        if let Some(mix) = below(&outcomes) {
+                            return mix;
+                        }
+                    }
+                }
+                summarize(cap.mv, outcomes, true, score_diff)
+            })
+            .collect();
+        for r in results {
+            if r.exact {
+                solved.push(r);
+            } else {
+                abandoned.push(r);
+            }
+        }
+    }
+    if stopped() {
+        return None;
+    }
+    solved.sort_by(rank);
+    let mut unsolved: Vec<PreEndgameMove> = rest.chain(abandoned).collect();
+    unsolved.sort_by(rank);
+    solved.extend(unsolved);
+    Some(solved)
 }
 
 /// True when the list's first play is proven best: it is solved, and no
@@ -433,7 +529,7 @@ pub fn solve_two_in_bag(
     };
 
     // Caps: what the opponent can surely get after the play.
-    let mut bounded: Vec<PreEndgameMove> = plays
+    let bounded: Vec<PreEndgameMove> = plays
         .into_par_iter()
         .map(|mv| {
             if stopped() {
@@ -473,130 +569,74 @@ pub fn solve_two_in_bag(
             Some(summarize(mv, outcomes, false, score_diff))
         })
         .collect::<Option<Vec<_>>>()?;
-    bounded.sort_by(rank);
-
-    let batch = rayon::current_num_threads().max(1) * 2;
-    let mut solved: Vec<PreEndgameMove> = Vec::new();
-    // Plays given up part way: their solved cases with caps for the rest,
-    // which already fell below the best play.
-    let mut abandoned: Vec<PreEndgameMove> = Vec::new();
-    let mut rest = bounded.into_iter().peekable();
-    loop {
-        if stopped() {
-            return None;
-        }
-        if expired() {
-            break;
-        }
-        let best = solved
-            .iter()
-            .min_by(|a, b| rank(a, b))
-            .map(|b| (b.win, b.spread));
-        let can_beat = |cap: &PreEndgameMove| best.is_none_or(|b| (cap.win, cap.spread) >= b);
-        // Until a play is solved nothing can be given up, so the first
-        // batch is the single most promising play (its cases in parallel).
-        let size = if best.is_some() { batch } else { 1 };
-        let mut next = Vec::with_capacity(size);
-        while next.len() < size {
-            match rest.next_if(|cap| can_beat(cap)) {
-                Some(cap) => next.push(cap),
-                None => break,
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        // Solve each play's cases, likeliest first, with the caps standing
-        // in for those not solved yet; give the play up as soon as that
-        // mix cannot beat the best play so far.
-        let results: Vec<PreEndgameMove> = next
-            .into_par_iter()
-            .map(|cap| {
-                let (after, cases) = cases(&cap.mv);
-                let analysis = Solver::new(&after, dictionary).analysis();
-                let score = cap.mv.score as i32;
-                let mut outcomes = cap.outcomes;
-                let replies = ReplyCache::default();
-                let solve = |c: &Case| match c.last {
-                    None => score - endgame.best_value_with(&after, &analysis, &c.theirs, &c.ours),
-                    Some(last) => {
-                        score
-                            + pass_value(
-                                &endgame,
-                                &after,
-                                dictionary,
-                                &c.ours,
-                                &c.theirs,
-                                last,
-                                Some(&replies),
-                            )
-                    }
-                };
-                let Some(b) = best else {
-                    // Nothing to beat yet: solve every case, in parallel.
-                    let values: Vec<i32> = cases.par_iter().map(solve).collect();
-                    for (o, v) in outcomes.iter_mut().zip(values) {
-                        o.value = v;
-                    }
-                    return summarize(cap.mv, outcomes, true, score_diff);
-                };
-                let below = |outcomes: &[DrawOutcome]| {
-                    let mix = summarize(cap.mv.clone(), outcomes.to_vec(), false, score_diff);
-                    ((mix.win, mix.spread) < b).then_some(mix)
-                };
-                // A one-tile play leaves the opponent one tile to draw:
-                // their top-scoring reply, valued exactly, is a much
-                // tighter cap than the first one, for one search each.
-                if cap.mv.tiles_used.len() == 1 {
-                    let here = Solver::with_analysis(&after, dictionary, &analysis);
-                    for (o, c) in outcomes.iter_mut().zip(&cases) {
-                        let (Some(last), Some(y)) = (c.last, here.best_move_by_score(&c.theirs))
-                        else {
-                            continue;
-                        };
-                        let after_y = place(&after, &y);
-                        let squares: Vec<(usize, usize)> =
-                            y.tiles_used.iter().map(|&(r, c, _)| (r, c)).collect();
-                        let a_y = analysis.after_placing(&after_y, dictionary, &squares);
-                        let mut drawn = remove(&c.theirs, &y.tiles_from_rack());
-                        drawn.push(last);
-                        let floor = y.score as i32
-                            - endgame.best_value_with(&after_y, &a_y, &c.ours, &drawn);
-                        o.value = o.value.min(score - floor.max(0));
-                    }
-                    if let Some(mix) = below(&outcomes) {
-                        return mix;
-                    }
-                }
-                // Solve the cases likeliest first, the caps standing in for
-                // the rest; give the play up as soon as that mix cannot
-                // beat the best play so far.
-                let mut order: Vec<usize> = (0..cases.len()).collect();
-                order.sort_by(|&x, &y| cases[y].probability.total_cmp(&cases[x].probability));
-                for (done, &i) in order.iter().enumerate() {
-                    outcomes[i].value = solve(&cases[i]);
-                    if done + 1 < order.len() {
-                        if let Some(mix) = below(&outcomes) {
-                            return mix;
-                        }
-                    }
-                }
-                summarize(cap.mv, outcomes, true, score_diff)
-            })
-            .collect();
-        for r in results {
-            if r.exact {
-                solved.push(r);
-            } else {
-                abandoned.push(r);
-            }
-        }
+    // Everything a play's cases share.
+    struct Prepared {
+        after: Board,
+        analysis: BoardAnalysis,
+        cases: Vec<Case>,
+        replies: ReplyCache,
     }
-    solved.sort_by(rank);
-    let mut unsolved: Vec<PreEndgameMove> = rest.chain(abandoned).collect();
-    unsolved.sort_by(rank);
-    solved.extend(unsolved);
-    Some(solved)
+    let prepare = |mv: &Move| {
+        let (after, cases) = cases(mv);
+        let analysis = Solver::new(&after, dictionary).analysis();
+        Prepared {
+            after,
+            analysis,
+            cases,
+            replies: ReplyCache::default(),
+        }
+    };
+    // A one-tile play leaves the opponent one tile to draw: their
+    // top-scoring reply, valued exactly, is a much tighter cap than the
+    // first one, for one search each.
+    let tighten = |mv: &Move, p: &Prepared, outcomes: &mut [DrawOutcome]| {
+        if mv.tiles_used.len() != 1 {
+            return;
+        }
+        let here = Solver::with_analysis(&p.after, dictionary, &p.analysis);
+        for (o, c) in outcomes.iter_mut().zip(&p.cases) {
+            let (Some(last), Some(y)) = (c.last, here.best_move_by_score(&c.theirs)) else {
+                continue;
+            };
+            let after_y = place(&p.after, &y);
+            let squares: Vec<(usize, usize)> =
+                y.tiles_used.iter().map(|&(r, c, _)| (r, c)).collect();
+            let a_y = p.analysis.after_placing(&after_y, dictionary, &squares);
+            let mut drawn = remove(&c.theirs, &y.tiles_from_rack());
+            drawn.push(last);
+            let floor = y.score as i32 - endgame.best_value_with(&after_y, &a_y, &c.ours, &drawn);
+            o.value = o.value.min(mv.score as i32 - floor.max(0));
+        }
+    };
+    let solve = |mv: &Move, p: &Prepared, i: usize| {
+        let c = &p.cases[i];
+        let score = mv.score as i32;
+        match c.last {
+            None => score - endgame.best_value_with(&p.after, &p.analysis, &c.theirs, &c.ours),
+            Some(last) => {
+                score
+                    + pass_value(
+                        &endgame,
+                        &p.after,
+                        dictionary,
+                        &c.ours,
+                        &c.theirs,
+                        last,
+                        Some(&p.replies),
+                    )
+            }
+        }
+    };
+    solve_from_caps(
+        bounded,
+        Vec::new(),
+        score_diff,
+        &stopped,
+        &expired,
+        &prepare,
+        &tighten,
+        &solve,
+    )
 }
 
 /// What passing is worth to us (spread change to the end of the game)
@@ -826,7 +866,8 @@ mod tests {
                 return;
             };
             for (board, ours, unseen) in positions(&dict, 3) {
-                let results = solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None).unwrap();
+                let results =
+                    solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None, None).unwrap();
                 assert!(!results.is_empty());
                 for r in &results {
                     let p: f32 = r.outcomes.iter().map(|o| o.probability).sum();
@@ -871,7 +912,8 @@ mod tests {
             };
             let endgame = EndgameSolver::new(&dict);
             for (board, ours, unseen) in positions(&dict, 2) {
-                let results = solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None).unwrap();
+                let results =
+                    solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None, None).unwrap();
                 assert!(results[0].exact, "the best play is solved");
                 for r in results.iter().filter(|r| r.exact).take(3) {
                     let mut after = board.clone();
@@ -958,7 +1000,7 @@ mod tests {
                         })
                         .fold((f32::MIN, f32::MIN), |a, b| if b > a { b } else { a });
                     let pruned =
-                        solve_one_in_bag(&board, &dict, &ours, &unseen, diff, None).unwrap();
+                        solve_one_in_bag(&board, &dict, &ours, &unseen, diff, None, None).unwrap();
                     assert!(pruned[0].exact);
                     assert!((pruned[0].win - best_full.0).abs() < 1e-4, "diff {diff}");
                     assert!((pruned[0].spread - best_full.1).abs() < 1e-3, "diff {diff}");
@@ -977,7 +1019,8 @@ mod tests {
         isolated(|| {
             let endgame = EndgameSolver::new(&dict);
             for (board, ours, unseen) in positions(&dict, 1) {
-                let results = solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None).unwrap();
+                let results =
+                    solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None, None).unwrap();
                 let pass = results
                     .iter()
                     .find(|r| r.mv.kind == crate::solver::MoveKind::Pass)
@@ -1012,7 +1055,7 @@ mod tests {
         };
         let board = Board::new();
         let rack: Vec<Tile> = "AEINRST".chars().map(Tile::new).collect();
-        assert!(solve_one_in_bag(&board, &dict, &rack, &rack, 0, None).is_none());
+        assert!(solve_one_in_bag(&board, &dict, &rack, &rack, 0, None, None).is_none());
     }
 
     /// Two-tile positions small enough to test quickly.
@@ -1216,7 +1259,7 @@ mod tests {
         };
         for (board, ours, unseen) in positions(&dict, 6) {
             let t = std::time::Instant::now();
-            let results = solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None).unwrap();
+            let results = solve_one_in_bag(&board, &dict, &ours, &unseen, 0, None, None).unwrap();
             let best = &results[0];
             println!(
                 "{} plays in {:?}; best {} {} win {:.0}% spread {:+.1}",

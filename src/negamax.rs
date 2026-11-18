@@ -24,7 +24,7 @@ use crate::board::{Board, BOARD_SIZE};
 use crate::dictionary::Dictionary;
 use crate::rules::Ending;
 use crate::solver::{BoardAnalysis, Move, MoveKind, Solver};
-use crate::tile::Tile;
+use crate::tile::{Tile, RACK_SIZE};
 
 /// A root move and what it is worth (spread change to the end of the game,
 /// for the side to move).
@@ -66,9 +66,72 @@ struct Entry {
     bound: Bound,
     /// Whether the value rests on positions cut off by the depth limit.
     horizon: bool,
-    /// Index of the best move in the (deterministic) move order, tried
-    /// first when the position comes up again.
-    best: usize,
+    /// The best move, tried first (before any other move is generated)
+    /// when the position comes up again.
+    best: Option<Stored>,
+}
+
+/// A move as the table keeps it: the tiles it places (none for a pass)
+/// and its score, without the allocations of a [`Move`].
+#[derive(Clone, Copy, PartialEq)]
+struct Stored {
+    n: u8,
+    tiles: [(u8, u8, Tile); RACK_SIZE],
+    score: u16,
+}
+
+impl Stored {
+    fn of(mv: &Move) -> Self {
+        let mut tiles = [(0, 0, Tile::new('A')); RACK_SIZE];
+        for (slot, &(r, c, t)) in tiles.iter_mut().zip(&mv.tiles_used) {
+            *slot = (r as u8, c as u8, t);
+        }
+        Stored {
+            n: mv.tiles_used.len() as u8,
+            tiles,
+            score: mv.score as u16,
+        }
+    }
+
+    fn is(&self, mv: &Move) -> bool {
+        mv.tiles_used.len() == self.n as usize
+            && mv
+                .tiles_used
+                .iter()
+                .zip(&self.tiles)
+                .all(|(&(r, c, t), &(sr, sc, st))| r == sr as usize && c == sc as usize && t == st)
+    }
+
+    /// The move again, for a side holding `mover`; `None` if it no longer
+    /// fits the board (only on a hash collision).
+    fn rebuild(&self, board: &Board, mover: &[Tile]) -> Option<Move> {
+        if self.n == 0 {
+            return Some(Move::pass(mover));
+        }
+        let tiles: Vec<(usize, usize, Tile)> = self.tiles[..self.n as usize]
+            .iter()
+            .map(|&(r, c, t)| (r as usize, c as usize, t))
+            .collect();
+        if tiles
+            .iter()
+            .any(|&(r, c, _)| board.get_tile(r, c).is_some())
+        {
+            return None;
+        }
+        let (r0, c0, _) = tiles[0];
+        Some(Move {
+            kind: MoveKind::Play,
+            word: String::new(),
+            row: r0,
+            col: c0,
+            direction: crate::board::Direction::Horizontal,
+            score: self.score as u32,
+            is_bingo: tiles.len() == RACK_SIZE,
+            tiles_used: tiles,
+            leave: Vec::new(),
+            equity: self.score as f32,
+        })
+    }
 }
 
 /// The table's keys are already hashes ([`position_key`]): use them as
@@ -325,13 +388,11 @@ impl Search<'_> {
             board.place_tile(*r, *c, *t);
         }
         let placed: Vec<(usize, usize)> = mv.tiles_used.iter().map(|&(r, c, _)| (r, c)).collect();
-        let child = if placed.is_empty() {
-            analysis.clone()
-        } else {
-            analysis.after_placing(board, self.dict, &placed)
-        };
+        // The child's analysis is made only if it searches its moves (not
+        // at the depth limit, nor when the table answers).
         let reply = self.negamax(
-            &child,
+            analysis,
+            &placed,
             board,
             other,
             &left,
@@ -347,12 +408,61 @@ impl Search<'_> {
         Some((score - v, h))
     }
 
+    /// The value of a position one ply from the depth limit, and whether it
+    /// rests on the limit. Each move leads to a position valued as the
+    /// game ending there (each side losing its rack), so passing is worth
+    /// `other - mover` (rack values) and a play `other + score - kept`,
+    /// plus `other` again if it goes out: [`Solver::best_endgame_play`]
+    /// finds the best play directly instead of searching every child.
+    #[allow(clippy::too_many_arguments)]
+    fn frontier(
+        &mut self,
+        analysis: &BoardAnalysis,
+        board: &Board,
+        mover: &[Tile],
+        other: &[Tile],
+        key: u64,
+        beta: i32,
+    ) -> (i32, bool) {
+        let theirs = rack_value(board, other);
+        let pass = theirs - rack_value(board, mover);
+        let play = Solver::with_analysis(board, self.dict, analysis)
+            .best_endgame_play(mover, theirs as u32)
+            .map(|m| {
+                (
+                    theirs + m.equity.round() as i32,
+                    m.tiles_used.len() == mover.len(),
+                )
+            });
+        let (value, out) = match play {
+            Some((v, out)) if v > pass => (v, out),
+            _ => (pass, false),
+        };
+        // Going out ends the game: no horizon. If that alone reaches beta
+        // it proves the cut-off; otherwise the value is the best of
+        // estimates at the limit.
+        let proven = out && value >= beta;
+        self.table.insert(
+            key,
+            Entry {
+                depth: 1,
+                value,
+                bound: if proven { Bound::Lower } else { Bound::Exact },
+                horizon: !proven,
+                best: None,
+            },
+        );
+        (value, !proven)
+    }
+
     /// The value for the side to move (holding `mover`), within the window
-    /// (`alpha`, `beta`), and whether it rests on the depth limit.
+    /// (`alpha`, `beta`), and whether it rests on the depth limit. The
+    /// board's analysis is `parent`'s with tiles just placed on `placed`.
     #[allow(clippy::too_many_arguments)] // the search state, recursively
     fn negamax(
         &mut self,
-        analysis: &BoardAnalysis,
+        parent: &BoardAnalysis,
+        placed: &[(usize, usize)],
         board: &mut Board,
         mover: &[Tile],
         other: &[Tile],
@@ -384,56 +494,85 @@ impl Search<'_> {
                 }
             }
         }
+        let owned;
+        let analysis = if placed.is_empty() {
+            parent
+        } else {
+            owned = parent.after_placing(board, self.dict, placed);
+            &owned
+        };
+        if depth == 1 {
+            // Every reply ends at the depth limit, valued as each side
+            // losing its rack: the best is one bounded search away.
+            return Some(self.frontier(analysis, board, mover, other, key, beta));
+        }
         let alpha_in = alpha;
         let mut best = i32::MIN + 1;
-        let mut best_index = 0;
+        let mut best_move: Option<Stored> = None;
         let mut horizon = false;
-        let moves = self.ordered_moves(board, analysis, mover, other);
-        // The best move from an earlier visit first, then the rest in order.
-        let first = self
+        // The best move from an earlier visit first, before generating any
+        // other: if it cuts off, the rest are never generated.
+        let remembered = self
             .table
             .get(&key)
-            .map_or(0, |e| e.best.min(moves.len() - 1));
-        let order = std::iter::once(first).chain((0..moves.len()).filter(|&i| i != first));
-        for (n, i) in order.enumerate() {
-            // Principal variation search: the first move gets the full
-            // window; the rest are first asked only whether they beat it
-            // (a null window), and searched fully only if they do.
-            let mv = &moves[i];
-            let (value, h) = if n == 0 {
-                self.child_value(
-                    analysis, board, mover, other, scoreless, mv, depth, alpha, beta,
-                )?
-            } else {
-                let probe = self.child_value(
-                    analysis,
-                    board,
-                    mover,
-                    other,
-                    scoreless,
-                    mv,
-                    depth,
-                    alpha,
-                    alpha.saturating_add(1),
-                )?;
-                if probe.0 > alpha && probe.0 < beta {
+            .and_then(|e| e.best)
+            .and_then(|st| Some((st, st.rebuild(board, mover)?)));
+        let mut tried = 0usize;
+        if let Some((st, mv)) = &remembered {
+            let (value, h) = self.child_value(
+                analysis, board, mover, other, scoreless, mv, depth, alpha, beta,
+            )?;
+            tried = 1;
+            best = value;
+            best_move = Some(*st);
+            horizon |= h;
+            alpha = alpha.max(value);
+        }
+        if alpha < beta {
+            let moves = self.ordered_moves(board, analysis, mover, other);
+            for mv in &moves {
+                if remembered.as_ref().is_some_and(|(st, _)| st.is(mv)) {
+                    continue;
+                }
+                // Principal variation search: the first move gets the full
+                // window; the rest are first asked only whether they beat
+                // it (a null window), and searched fully only if they do.
+                let (value, h) = if tried == 0 {
                     self.child_value(
                         analysis, board, mover, other, scoreless, mv, depth, alpha, beta,
                     )?
                 } else {
-                    probe
+                    let probe = self.child_value(
+                        analysis,
+                        board,
+                        mover,
+                        other,
+                        scoreless,
+                        mv,
+                        depth,
+                        alpha,
+                        alpha.saturating_add(1),
+                    )?;
+                    if probe.0 > alpha && probe.0 < beta {
+                        self.child_value(
+                            analysis, board, mover, other, scoreless, mv, depth, alpha, beta,
+                        )?
+                    } else {
+                        probe
+                    }
+                };
+                tried += 1;
+                if value > best {
+                    best = value;
+                    best_move = Some(Stored::of(mv));
                 }
-            };
-            if value > best {
-                best = value;
-                best_index = i;
-            }
-            horizon |= h;
-            if value > alpha {
-                alpha = value;
-            }
-            if alpha >= beta {
-                break;
+                horizon |= h;
+                if value > alpha {
+                    alpha = value;
+                }
+                if alpha >= beta {
+                    break;
+                }
             }
         }
         let bound = if best <= alpha_in {
@@ -450,7 +589,7 @@ impl Search<'_> {
                 value: best,
                 bound,
                 horizon,
-                best: best_index,
+                best: best_move,
             },
         );
         Some((best, horizon))

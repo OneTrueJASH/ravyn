@@ -296,8 +296,20 @@ impl BoardAnalysis {
         }
         let mut info = self.info.clone();
         info.tile_count += placed.len();
+        // The squares to redo: the placed ones, and the empty square at
+        // each end of the runs through them, each once (the tiles of one
+        // play share the ends of the run along it).
+        let mut todo: [(usize, usize); 5 * crate::tile::RACK_SIZE] =
+            [(0, 0); 5 * crate::tile::RACK_SIZE];
+        let mut n = 0;
+        let mut add = |sq: (usize, usize)| {
+            if !todo[..n].contains(&sq) && n < todo.len() {
+                todo[n] = sq;
+                n += 1;
+            }
+        };
         for &(row, col) in placed {
-            solver.analyze_square(&mut info, row, col);
+            add((row, col));
             for (dr, dc) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
                 let (mut r, mut c) = (row as i32, col as i32);
                 while Board::is_valid_position(r, c)
@@ -307,9 +319,12 @@ impl BoardAnalysis {
                     c += dc;
                 }
                 if Board::is_valid_position(r, c) {
-                    solver.analyze_square(&mut info, r as usize, c as usize);
+                    add((r as usize, c as usize));
                 }
             }
+        }
+        for &(row, col) in &todo[..n] {
+            solver.analyze_square(&mut info, row, col);
         }
         BoardAnalysis { info }
     }
@@ -323,6 +338,8 @@ pub struct Solver<'a> {
     rules: &'static Rules,
     /// The board analysis, when computed up front ([`Self::prepared`]).
     info: Option<std::borrow::Cow<'a, BoardInfo>>,
+    /// How kept tiles count toward a play's equity.
+    valuation: Valuation,
 }
 
 /// Board-derived tables that depend only on the position, not the rack.
@@ -437,6 +454,7 @@ struct Placed {
 pub(crate) struct LeaveTable<'d> {
     dictionary: &'d Dictionary,
     unseen: Option<usize>,
+    valuation: Valuation,
     /// Index weight of one tile of each kind (blank at 26); 0 if absent.
     strides: [u16; 27],
     /// Count of each kind in the full rack.
@@ -463,12 +481,19 @@ impl<'d> LeaveTable<'d> {
         LeaveTable {
             dictionary,
             unseen,
+            valuation: Valuation::Leaves,
             strides,
             counts,
             full,
             values: [0.0; 128],
             known: 0,
         }
+    }
+
+    /// The table valuing kept tiles by `valuation` instead.
+    fn valued(mut self, valuation: Valuation) -> Self {
+        self.valuation = valuation;
+        self
     }
 
     /// Index of the full rack.
@@ -507,12 +532,42 @@ impl<'d> LeaveTable<'d> {
     #[inline]
     pub(crate) fn value(&mut self, index: usize) -> f32 {
         if self.known & (1u128 << index) == 0 {
-            let tiles = tiles_from_counts(&self.subset_counts(index));
-            self.values[index] = self.dictionary.leave_value(&tiles, self.unseen);
+            let counts = self.subset_counts(index);
+            self.values[index] = match self.valuation {
+                Valuation::Leaves => self
+                    .dictionary
+                    .leave_value(&tiles_from_counts(&counts), self.unseen),
+                Valuation::Endgame { rules, out_bonus } => {
+                    let face: u32 = counts[..26]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &n)| n as u32 * rules.letter_value(index_letter(i)))
+                        .sum();
+                    let out = if counts.iter().all(|&n| n == 0) {
+                        out_bonus
+                    } else {
+                        0
+                    };
+                    out as f32 - face as f32
+                }
+            };
             self.known |= 1u128 << index;
         }
         self.values[index]
     }
+}
+
+/// How the tiles kept after a play are valued.
+#[derive(Clone, Copy)]
+enum Valuation {
+    /// Leave values (the dictionary's table or heuristic).
+    Leaves,
+    /// At an endgame search's horizon: minus their face value, or
+    /// `out_bonus` when none are kept (the play goes out).
+    Endgame {
+        rules: &'static Rules,
+        out_bonus: u32,
+    },
 }
 
 /// Tiles for a count array (blanks at index 26, undesignated).
@@ -675,6 +730,7 @@ impl<'a> Solver<'a> {
             dictionary,
             rules: board.rules(),
             info: None,
+            valuation: Valuation::Leaves,
         }
     }
 
@@ -777,6 +833,29 @@ impl<'a> Solver<'a> {
             .collect()
     }
 
+    /// The best play at an endgame search's horizon, where each side is
+    /// left holding its rack: the highest score plus the face value of the
+    /// tiles played, plus `out_bonus` for a play that uses every tile. Its
+    /// `equity` is that score less the face value of the tiles kept (plus
+    /// the bonus). Builds only that move, with the anchor bounds of the
+    /// best-equity search.
+    pub fn best_endgame_play(&self, tiles: &[Tile], out_bonus: u32) -> Option<Move> {
+        Solver {
+            board: self.board,
+            dictionary: self.dictionary,
+            rules: self.rules,
+            info: self
+                .info
+                .as_ref()
+                .map(|i| std::borrow::Cow::Borrowed(i.as_ref())),
+            valuation: Valuation::Endgame {
+                rules: self.rules,
+                out_bonus,
+            },
+        }
+        .best_move_by_equity(tiles)
+    }
+
     /// The `k` highest-scoring plays, best first (equal scores in the
     /// canonical tie order; single-tile duplicates removed as
     /// `find_moves` does). Builds only those moves.
@@ -815,7 +894,8 @@ impl<'a> Solver<'a> {
             .rules
             .total_tiles()
             .saturating_sub(tile_count + tiles.len());
-        let mut leaves = LeaveTable::new(counts, self.dictionary, Some(unseen));
+        let mut leaves =
+            LeaveTable::new(counts, self.dictionary, Some(unseen)).valued(self.valuation);
         self.materialize_with(snap, &mut leaves)
     }
 
@@ -872,7 +952,7 @@ impl<'a> Solver<'a> {
         };
         let unseen = self.unseen_for(info, tiles.len());
         let counts = rack_counts(tiles);
-        let leaves = LeaveTable::new(counts, self.dictionary, Some(unseen));
+        let leaves = LeaveTable::new(counts, self.dictionary, Some(unseen)).valued(self.valuation);
         let leave_index = leaves.full_index();
 
         let mut gen = Gen {
@@ -1150,6 +1230,7 @@ impl<'a> Solver<'a> {
             dictionary,
             rules: board.rules(),
             info: Some(std::borrow::Cow::Borrowed(&analysis.info)),
+            valuation: Valuation::Leaves,
         }
     }
 
@@ -2531,6 +2612,39 @@ mod tests {
                         .map(|m| m.score)
                         .collect();
                     assert_eq!(by_score, scores, "{label} k={k} by score");
+                }
+                for bonus in [0, 9] {
+                    let face = |m: &Move| -> u32 {
+                        m.tiles_used
+                            .iter()
+                            .map(|(_, _, t)| crate::rules::CROSSPLAY.tile_value(t))
+                            .sum()
+                    };
+                    let key = |m: &Move| {
+                        m.score
+                            + face(m)
+                            + if m.tiles_used.len() == tiles.len() {
+                                bonus
+                            } else {
+                                0
+                            }
+                    };
+                    let want = all.iter().map(key).max();
+                    let got = solver.best_endgame_play(&tiles, bonus);
+                    assert_eq!(got.as_ref().map(key), want, "{label} endgame bonus {bonus}");
+                    if let Some(m) = &got {
+                        let kept: u32 = tiles
+                            .iter()
+                            .map(|t| crate::rules::CROSSPLAY.tile_value(t))
+                            .sum::<u32>()
+                            - face(m);
+                        let out = if m.tiles_used.len() == tiles.len() {
+                            bonus
+                        } else {
+                            0
+                        };
+                        assert_eq!(m.equity, (m.score + out) as f32 - kept as f32, "{label}");
+                    }
                 }
                 if let Some(first) = all.first() {
                     for t in [

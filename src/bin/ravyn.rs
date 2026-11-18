@@ -40,7 +40,7 @@ commands:
               our last; Scrabble: negamax to the end, --seconds budget)
   preendgame  one or two tiles in the bag: exact over every possible
               last tile, or every way the last two can come out (Crossplay;
-              two tiles: --seconds budget, passing not evaluated)
+              --seconds budget; with two, passing not evaluated)
   infer       what the opponent kept: CGP is the board BEFORE their play,
               with OUR rack; needs --played and --score
   train-leaves  fit leave values by self-play, generation by generation,
@@ -61,8 +61,8 @@ options:
   --rules NAME    `crossplay` (default) or `scrabble`
   --top N         rows to print (default 20)
   --candidates N  sim: candidates to simulate (default 30)
-  --seconds S     sim, two-tile preendgame and Scrabble endgame: time
-                  budget (default 10)
+  --seconds S     sim, preendgame and Scrabble endgame: time budget
+                  (default 10)
   --last WHO      endgame: who plays the final move, `them` (default:
                   they emptied the bag) or `us`
   --played TILES  infer: the tiles they played, `?` for a blank
@@ -554,20 +554,10 @@ fn preendgame(o: &Options, state: &SolverState, dict: &Dictionary) -> Result<(),
     let bag = unseen.len().saturating_sub(RACK_SIZE);
     let ours = state.rack.tiles();
     let diff = score_diff(&o.cgp);
+    let deadline = Some(std::time::Instant::now() + Duration::from_secs(o.seconds.max(1)));
     let results = match bag {
-        1 => solve_one_in_bag(&state.board, dict, &ours, &unseen, diff, None),
-        2 => {
-            let deadline = std::time::Instant::now() + Duration::from_secs(o.seconds.max(1));
-            solve_two_in_bag(
-                &state.board,
-                dict,
-                &ours,
-                &unseen,
-                diff,
-                None,
-                Some(deadline),
-            )
-        }
+        1 => solve_one_in_bag(&state.board, dict, &ours, &unseen, diff, None, deadline),
+        2 => solve_two_in_bag(&state.board, dict, &ours, &unseen, diff, None, deadline),
         _ => {
             return Err(format!(
                 "{} tiles unseen: preendgame needs one or two in the bag ({} or {} unseen)",
@@ -579,21 +569,21 @@ fn preendgame(o: &Options, state: &SolverState, dict: &Dictionary) -> Result<(),
     }
     .ok_or("no result")?;
     let solved = results.iter().filter(|r| r.exact).count();
+    let status = if proven(&results) {
+        "the best is proven"
+    } else {
+        "time ran out: unsolved plays might be better (--seconds)"
+    };
     if bag == 1 {
         println!(
-            "{} candidates, {solved} solved exactly over each possible last tile",
+            "{} candidates, {solved} solved exactly over each possible last tile; {status}",
             results.len()
         );
     } else {
         println!(
-            "{} plays, {solved} solved exactly over each way the last two tiles can come out; {} \
-             (passing not evaluated)",
-            results.len(),
-            if proven(&results) {
-                "the best is proven"
-            } else {
-                "time ran out: unsolved plays might be better (--seconds)"
-            }
+            "{} plays, {solved} solved exactly over each way the last two tiles can come out; \
+             {status} (passing not evaluated)",
+            results.len()
         );
     }
     println!(
