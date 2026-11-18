@@ -19,7 +19,7 @@ use ravyn::leavegen::{train_generation, TrainingSettings};
 use ravyn::leaves::LeaveValues;
 use ravyn::mcts::{self_play_match_with_progress, MatchEngine, MatchResult, SimChoice};
 use ravyn::negamax::{solve_go_out, GoOutSettings};
-use ravyn::preendgame::solve_one_in_bag;
+use ravyn::preendgame::{proven, solve_one_in_bag, solve_two_in_bag};
 use ravyn::rules::{Ending, Rules, CROSSPLAY, SCRABBLE};
 use ravyn::sim::{ArmStatus, SimSettings, Simulation};
 use ravyn::solver::{Move, MoveKind};
@@ -38,8 +38,9 @@ commands:
   sim         simulate the best candidates; rank by mean final spread
   endgame     bag empty: exact search (Crossplay: our play, their reply,
               our last; Scrabble: negamax to the end, --seconds budget)
-  preendgame  one tile in the bag: exact over every possible last tile
-              (Crossplay)
+  preendgame  one or two tiles in the bag: exact over every possible
+              last tile, or every way the last two can come out (Crossplay;
+              two tiles: --seconds budget, passing not evaluated)
   infer       what the opponent kept: CGP is the board BEFORE their play,
               with OUR rack; needs --played and --score
   train-leaves  fit leave values by self-play, generation by generation,
@@ -60,7 +61,8 @@ options:
   --rules NAME    `crossplay` (default) or `scrabble`
   --top N         rows to print (default 20)
   --candidates N  sim: candidates to simulate (default 30)
-  --seconds S     sim and Scrabble endgame: time budget (default 10)
+  --seconds S     sim, two-tile preendgame and Scrabble endgame: time
+                  budget (default 10)
   --last WHO      endgame: who plays the final move, `them` (default:
                   they emptied the bag) or `us`
   --played TILES  infer: the tiles they played, `?` for a blank
@@ -549,44 +551,88 @@ fn preendgame(o: &Options, state: &SolverState, dict: &Dictionary) -> Result<(),
         return Err("preendgame needs Crossplay's equal-turn ending".into());
     }
     let unseen = unseen(state);
-    if unseen.len() != RACK_SIZE + 1 {
-        return Err(format!(
-            "{} tiles unseen: preendgame needs exactly one in the bag ({} unseen)",
-            unseen.len(),
-            RACK_SIZE + 1
-        ));
+    let bag = unseen.len().saturating_sub(RACK_SIZE);
+    let ours = state.rack.tiles();
+    let diff = score_diff(&o.cgp);
+    let results = match bag {
+        1 => solve_one_in_bag(&state.board, dict, &ours, &unseen, diff, None),
+        2 => {
+            let deadline = std::time::Instant::now() + Duration::from_secs(o.seconds.max(1));
+            solve_two_in_bag(
+                &state.board,
+                dict,
+                &ours,
+                &unseen,
+                diff,
+                None,
+                Some(deadline),
+            )
+        }
+        _ => {
+            return Err(format!(
+                "{} tiles unseen: preendgame needs one or two in the bag ({} or {} unseen)",
+                unseen.len(),
+                RACK_SIZE + 1,
+                RACK_SIZE + 2
+            ))
+        }
     }
-    let results = solve_one_in_bag(
-        &state.board,
-        dict,
-        &state.rack.tiles(),
-        &unseen,
-        score_diff(&o.cgp),
-        None,
-    )
     .ok_or("no result")?;
     let solved = results.iter().filter(|r| r.exact).count();
+    if bag == 1 {
+        println!(
+            "{} candidates, {solved} solved exactly over each possible last tile",
+            results.len()
+        );
+    } else {
+        println!(
+            "{} plays, {solved} solved exactly over each way the last two tiles can come out; {} \
+             (passing not evaluated)",
+            results.len(),
+            if proven(&results) {
+                "the best is proven"
+            } else {
+                "time ran out: unsolved plays might be better (--seconds)"
+            }
+        );
+    }
     println!(
-        "{} candidates, {solved} solved exactly over each possible last tile",
-        results.len()
-    );
-    println!(
-        "{:<24} {:>5} {:>6} {:>8}  by last tile",
-        "move", "score", "win%", "spread"
+        "{:<24} {:>5} {:>6} {:>8}  {}",
+        "move",
+        "score",
+        "win%",
+        "spread",
+        if bag == 1 {
+            "by last tile"
+        } else {
+            "worst / best case"
+        }
     );
     for r in results.iter().filter(|r| r.exact).take(o.top) {
-        let cases: Vec<String> = r
-            .outcomes
-            .iter()
-            .map(|c| format!("{}{:+}", c.tile, c.value))
-            .collect();
+        let cases = if bag == 1 {
+            let cases: Vec<String> = r
+                .outcomes
+                .iter()
+                .map(|c| format!("{}{:+}", c.tiles, c.value))
+                .collect();
+            cases.join(" ")
+        } else {
+            let worst = r.outcomes.iter().min_by_key(|c| c.value);
+            let best = r.outcomes.iter().max_by_key(|c| c.value);
+            match (worst, best) {
+                (Some(w), Some(b)) => {
+                    format!("{} {:+} / {} {:+}", w.tiles, w.value, b.tiles, b.value)
+                }
+                _ => String::new(),
+            }
+        };
         println!(
             "{:<24} {:>5} {:>6.1} {:>+8.2}  {}",
             label(&r.mv),
             r.mv.score,
             r.win * 100.0,
             r.spread,
-            cases.join(" ")
+            cases
         );
     }
     Ok(())

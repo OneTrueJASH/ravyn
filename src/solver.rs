@@ -622,6 +622,8 @@ enum Sink {
     BestEquity(Option<Snapshot>),
     /// The `k` plays with the highest equity, best first.
     TopEquity { k: usize, kept: Vec<Snapshot> },
+    /// The `k` highest-scoring plays, best first.
+    TopScore { k: usize, kept: Vec<Snapshot> },
     /// Whether any play's equity exceeds `threshold`; the search stops at
     /// the first that does.
     Beats { threshold: f32, found: bool },
@@ -768,6 +770,25 @@ impl<'a> Solver<'a> {
             kept: Vec::with_capacity(k + 1),
         };
         let Sink::TopEquity { kept, .. } = self.generate(tiles, sink) else {
+            unreachable!("the sink comes back as it went in");
+        };
+        kept.iter()
+            .map(|snap| self.materialize(tiles, snap))
+            .collect()
+    }
+
+    /// The `k` highest-scoring plays, best first (equal scores in the
+    /// canonical tie order; single-tile duplicates removed as
+    /// `find_moves` does). Builds only those moves.
+    pub fn top_moves_by_score(&self, tiles: &[Tile], k: usize) -> Vec<Move> {
+        if k == 0 {
+            return Vec::new();
+        }
+        let sink = Sink::TopScore {
+            k,
+            kept: Vec::with_capacity(k + 1),
+        };
+        let Sink::TopScore { kept, .. } = self.generate(tiles, sink) else {
             unreachable!("the sink comes back as it went in");
         };
         kept.iter()
@@ -1285,7 +1306,7 @@ impl<'s, 'a> Gen<'s, 'a> {
         }
         values[..tiles.len()].sort_unstable_by(|a, b| b.cmp(a));
         let mut best_leave = [f32::NEG_INFINITY; RACK_SIZE + 1];
-        let by_equity = !matches!(self.sink, Sink::BestScore(_));
+        let by_equity = !matches!(self.sink, Sink::BestScore(_) | Sink::TopScore { .. });
         if by_equity {
             for index in 0..=self.leaves.full_index() {
                 let size: usize = self
@@ -1441,6 +1462,7 @@ impl<'s, 'a> Gen<'s, 'a> {
             Sink::BestScore(Some(best)) => bound < best.score as f32,
             Sink::BestEquity(Some(best)) => bound < best.equity,
             Sink::TopEquity { k, kept } if kept.len() == *k => bound < kept[k - 1].equity,
+            Sink::TopScore { k, kept } if kept.len() == *k => bound < kept[k - 1].score as f32,
             _ => false,
         }
     }
@@ -1726,6 +1748,32 @@ impl<'s, 'a> Gen<'s, 'a> {
                 }
                 return;
             }
+            Sink::TopScore { k, kept } => {
+                let k = *k;
+                let beats = |a: &Snapshot, b: &Snapshot| {
+                    a.score > b.score || (a.score == b.score && a.ties_first(b))
+                };
+                if kept.len() == k && !beats(&snap, &kept[k - 1]) {
+                    return;
+                }
+                // One copy of a one-tile play found both ways, as in
+                // `TopEquity`.
+                if let Some(key) = snap.single_tile_key() {
+                    if let Some(i) = kept.iter().position(|o| o.single_tile_key() == Some(key)) {
+                        if !beats(&snap, &kept[i]) {
+                            return;
+                        }
+                        kept.remove(i);
+                    }
+                }
+                let at = kept
+                    .iter()
+                    .position(|o| beats(&snap, o))
+                    .unwrap_or(kept.len());
+                kept.insert(at, snap);
+                kept.truncate(k);
+                return;
+            }
             Sink::All(_) | Sink::BestEquity(_) | Sink::TopEquity { .. } | Sink::Beats { .. } => {}
         }
 
@@ -1769,7 +1817,7 @@ impl<'s, 'a> Gen<'s, 'a> {
                     self.abort = true;
                 }
             }
-            Sink::BestScore(_) => unreachable!("handled above"),
+            Sink::BestScore(_) | Sink::TopScore { .. } => unreachable!("handled above"),
         }
     }
 
@@ -2474,6 +2522,15 @@ mod tests {
                         .collect();
                     let want: Vec<_> = all.iter().take(k).map(tiles_key).collect();
                     assert_eq!(top, want, "{label} k={k}");
+                    let mut scores: Vec<u32> = all.iter().map(|m| m.score).collect();
+                    scores.sort_unstable_by(|a, b| b.cmp(a));
+                    scores.truncate(k);
+                    let by_score: Vec<u32> = solver
+                        .top_moves_by_score(&tiles, k)
+                        .iter()
+                        .map(|m| m.score)
+                        .collect();
+                    assert_eq!(by_score, scores, "{label} k={k} by score");
                 }
                 if let Some(first) = all.first() {
                     for t in [
@@ -2543,6 +2600,15 @@ mod tests {
                     assert_eq!(a.equity, b.equity, "{label} k={k}");
                     assert_eq!(a.score, b.score, "{label} k={k}");
                 }
+                let mut scores: Vec<u32> = all.iter().map(|m| m.score).collect();
+                scores.sort_unstable_by(|a, b| b.cmp(a));
+                scores.truncate(k);
+                let by_score: Vec<u32> = solver
+                    .top_moves_by_score(&tiles, k)
+                    .iter()
+                    .map(|m| m.score)
+                    .collect();
+                assert_eq!(by_score, scores, "{label} k={k} by score");
             }
 
             let exchanges = exchange_moves(&tiles, &dict, Some(60));

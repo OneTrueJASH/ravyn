@@ -21,7 +21,8 @@ behind the leader's.
 - **Exact endgames**: Crossplay's equal-turn ending, and Scrabble's go-out
   ending by negamax
 - **Exact pre-endgame** with one tile in the bag (Crossplay), the pass
-  included
+  included, and with two (every play, within a time budget, saying
+  whether the best is proven)
 - **Rules as data**: `rules::CROSSPLAY` and `rules::SCRABBLE`
 - **Game records (GCG)**: read, write and replay them, and review a game
   move by move against the engine's best

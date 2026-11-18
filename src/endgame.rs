@@ -31,7 +31,7 @@ use rayon::prelude::*;
 
 use crate::board::Board;
 use crate::dictionary::Dictionary;
-use crate::solver::{Move, Solver};
+use crate::solver::{BoardAnalysis, Move, Solver};
 use crate::tile::{Rack, Tile};
 
 /// Who plays the very last move of the game.
@@ -130,23 +130,55 @@ impl<'a> EndgameSolver<'a> {
     /// the search stops at the first play that cannot beat the best value
     /// so far.
     pub fn best_value(&self, board: &Board, mover: &[Tile], last: &[Tile]) -> i32 {
-        let final_score = |b: &Board| Solver::new(b, self.dictionary).best_score(last) as i32;
+        let analysis = Solver::new(board, self.dictionary).analysis();
+        self.best_value_with(board, &analysis, mover, last)
+    }
+
+    /// [`Self::best_value`] with `board`'s analysis already made. The board
+    /// after each play is analyzed incrementally from it, which is most of
+    /// the saving when one board is solved for many pairs of racks.
+    pub fn best_value_with(
+        &self,
+        board: &Board,
+        analysis: &BoardAnalysis,
+        mover: &[Tile],
+        last: &[Tile],
+    ) -> i32 {
         // Passing: the other side then takes its best final play here.
-        let mut best = -final_score(board);
-        let mut moves = Solver::new(board, self.dictionary).find_moves_for(mover);
-        moves.sort_by_key(|m| std::cmp::Reverse(m.score));
+        let mut best =
+            -(Solver::with_analysis(board, self.dictionary, analysis).best_score(last) as i32);
+        // Plays from the highest score down, fetched a few at a time: the
+        // search usually stops after the first handful, and building every
+        // play (tens of thousands with a blank) would cost the most.
+        let solver = Solver::with_analysis(board, self.dictionary, analysis);
         let mut after = board.clone();
-        for mv in &moves {
-            if mv.score as i32 <= best {
+        let mut squares = Vec::with_capacity(crate::tile::RACK_SIZE);
+        let mut fetched = 16;
+        let mut done = 0;
+        'search: loop {
+            let moves = solver.top_moves_by_score(mover, fetched);
+            for mv in &moves[done..] {
+                if mv.score as i32 <= best {
+                    break 'search;
+                }
+                squares.clear();
+                for (r, c, t) in &mv.tiles_used {
+                    after.place_tile(*r, *c, *t);
+                    squares.push((*r, *c));
+                }
+                let next = analysis.after_placing(&after, self.dictionary, &squares);
+                let final_score =
+                    Solver::with_analysis(&after, self.dictionary, &next).best_score(last) as i32;
+                best = best.max(mv.score as i32 - final_score);
+                for (r, c, _) in &mv.tiles_used {
+                    after.remove_tile(*r, *c);
+                }
+            }
+            if moves.len() < fetched {
                 break;
             }
-            for (r, c, t) in &mv.tiles_used {
-                after.place_tile(*r, *c, *t);
-            }
-            best = best.max(mv.score as i32 - final_score(&after));
-            for (r, c, _) in &mv.tiles_used {
-                after.remove_tile(*r, *c);
-            }
+            done = moves.len();
+            fetched *= 4;
         }
         best
     }

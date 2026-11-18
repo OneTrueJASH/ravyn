@@ -256,3 +256,16 @@ fn gcg_reviews_a_game_and_prints_its_positions() {
         "{out}"
     );
 }
+
+/// Two tiles in the bag: every play is ranked and the best is proven.
+#[test]
+fn preendgame_with_two_in_the_bag() {
+    if common::dictionary().is_none() {
+        return;
+    }
+    const TWO: &str = "VETO2MENSCH3/1DEFTLY8/3F11/3E3U7/2BRAZING6/1COSTA1S7/1I4RAKER4/1N5WAXED3/1E3JANE1MELD1/1R9S2H/1I2OUTA1QOPH1O/1N3POLlinIA1O/11S2L/10WEDGY/11R3";
+    let out = stdout(&ravyn(&["preendgame", &format!("{TWO} IIIIUTR/ 0/0 0")]));
+    assert!(out.contains("the best is proven"), "{out}");
+    let first = out.lines().nth(2).unwrap_or_default();
+    assert!(first.starts_with("A11 TUI"), "{out}");
+}
