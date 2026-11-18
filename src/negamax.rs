@@ -14,10 +14,16 @@
 //! first of all, and a transposition table keeps what each position is
 //! worth across move orders and depths.
 //!
+//! The root's moves after the first are searched in parallel, sharing the
+//! table (see `root`).
+//!
 //! [`Ending::GoOut`]: crate::rules::Ending::GoOut
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::Mutex;
+
+use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
 use crate::board::{Board, BOARD_SIZE};
@@ -155,13 +161,72 @@ impl std::hash::Hasher for KeyHasher {
 
 type Table = HashMap<u64, Entry, std::hash::BuildHasherDefault<KeyHasher>>;
 
-struct Search<'a> {
+/// Shards of the shared transposition table: enough that the search
+/// threads seldom wait for one another.
+const SHARDS: usize = 64;
+
+/// The transposition table the search threads share, in locked shards
+/// chosen by the key's top bits.
+struct SharedTable {
+    shards: Vec<Mutex<Table>>,
+}
+
+impl SharedTable {
+    fn new() -> Self {
+        SharedTable {
+            shards: (0..SHARDS).map(|_| Mutex::new(Table::default())).collect(),
+        }
+    }
+
+    fn shard(&self, key: u64) -> &Mutex<Table> {
+        &self.shards[(key >> 58) as usize % SHARDS]
+    }
+
+    fn get(&self, key: u64) -> Option<Entry> {
+        self.shard(key).lock().ok()?.get(&key).copied()
+    }
+
+    fn insert(&self, key: u64, entry: Entry) {
+        if let Ok(mut shard) = self.shard(key).lock() {
+            shard.insert(key, entry);
+        }
+    }
+}
+
+/// What the search threads share: the table, the limits, and the count of
+/// positions searched.
+struct Shared<'a> {
     dict: &'a Dictionary,
-    table: Table,
-    nodes: u64,
+    table: SharedTable,
     deadline: Option<Instant>,
     cancel: Option<&'a AtomicBool>,
+    /// Set by the first thread to run out of time, stopping the others.
+    stop: AtomicBool,
+    nodes: AtomicU64,
+}
+
+/// One thread's search, adding its position count to the shared one when
+/// done.
+struct Search<'a> {
+    shared: &'a Shared<'a>,
+    nodes: u64,
     out_of_time: bool,
+}
+
+impl<'a> Search<'a> {
+    fn new(shared: &'a Shared<'a>) -> Self {
+        Search {
+            shared,
+            nodes: 0,
+            out_of_time: false,
+        }
+    }
+}
+
+impl Drop for Search<'_> {
+    fn drop(&mut self) {
+        self.shared.nodes.fetch_add(self.nodes, Ordering::Relaxed);
+    }
 }
 
 /// Limits and starting state of a go-out endgame search.
@@ -198,13 +263,13 @@ pub fn solve_go_out(
     cancel: Option<&AtomicBool>,
 ) -> Option<GoOutResult> {
     let (scoreless, max_depth, budget) = (settings.scoreless, settings.max_depth, settings.budget);
-    let mut search = Search {
+    let shared = Shared {
         dict,
-        table: Table::default(),
-        nodes: 0,
+        table: SharedTable::new(),
         deadline: budget.map(|b| Instant::now() + b),
         cancel,
-        out_of_time: false,
+        stop: AtomicBool::new(false),
+        nodes: AtomicU64::new(0),
     };
     let mut best: Option<GoOutResult> = None;
     for depth in 1..=max_depth.max(1) {
@@ -213,7 +278,7 @@ pub fn solve_go_out(
         let order = best
             .as_ref()
             .map(|b| b.lines.iter().map(|l| l.mv.clone()).collect());
-        let Some((lines, horizon)) = search.root(board, ours, theirs, scoreless, depth, order)
+        let Some((lines, horizon)) = root(&shared, board, ours, theirs, scoreless, depth, order)
         else {
             break;
         };
@@ -222,7 +287,7 @@ pub fn solve_go_out(
             lines,
             solved,
             depth,
-            nodes: search.nodes,
+            nodes: shared.nodes.load(Ordering::Relaxed),
         });
         if solved {
             break;
@@ -287,13 +352,91 @@ fn position_key(board: &Board, mover: &[Tile], other: &[Tile], scoreless: usize)
     h
 }
 
+/// Value and line of each root move at `depth`, best first, and whether
+/// any line reached the depth limit. `None` if time ran out.
+///
+/// The first move (the best of the previous depth) is searched alone, to
+/// set the bar; the rest are searched in parallel, each with the best value
+/// known when it starts (the window (`alpha`, `+inf`)). A move that comes
+/// back above its `alpha` is exact; one that does not was only proved no
+/// better, whatever the other threads found meanwhile. A solved result is
+/// therefore the same however the threads run; an estimate (a depth that
+/// reached its limit) can differ between runs, as it depends on which
+/// table entries other threads stored first.
+fn root(
+    shared: &Shared,
+    board: &Board,
+    ours: &[Tile],
+    theirs: &[Tile],
+    scoreless: usize,
+    depth: usize,
+    order: Option<Vec<Move>>,
+) -> Option<(Vec<EndgameLine>, bool)> {
+    let analysis = Solver::new(board, shared.dict).analysis();
+    let moves =
+        order.unwrap_or_else(|| Search::new(shared).ordered_moves(board, &analysis, ours, theirs));
+    let value_of = |mv: &Move, alpha: i32| {
+        let mut search = Search::new(shared);
+        let mut board = board.clone();
+        search.child_value(
+            &analysis,
+            &mut board,
+            ours,
+            theirs,
+            scoreless,
+            mv,
+            depth,
+            alpha,
+            i32::MAX,
+        )
+    };
+    let (first, rest) = moves.split_first()?;
+    let (v0, h0) = value_of(first, i32::MIN + 1)?;
+    let alpha = AtomicI32::new(v0);
+    let others = rest
+        .par_iter()
+        .map(|mv| {
+            let a = alpha.load(Ordering::Relaxed);
+            let (value, h) = value_of(mv, a)?;
+            let exact = value > a;
+            if exact {
+                alpha.fetch_max(value, Ordering::Relaxed);
+            }
+            Some((value, h, exact))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // A cut-off move's bound is only proof if it did not rest on the depth
+    // limit either, so any horizon makes the depth inexact.
+    let mut horizon = h0;
+    let mut lines = vec![EndgameLine {
+        mv: first.clone(),
+        value: v0,
+        exact: true,
+    }];
+    for (mv, (value, h, exact)) in rest.iter().zip(others) {
+        horizon |= h;
+        lines.push(EndgameLine {
+            mv: mv.clone(),
+            value,
+            exact,
+        });
+    }
+    // Stable: equal values keep the move order, whatever the threads did.
+    lines.sort_by(|a, b| b.value.cmp(&a.value).then(b.exact.cmp(&a.exact)));
+    Some((lines, horizon))
+}
+
 impl Search<'_> {
     fn stopped(&mut self) -> bool {
-        if self.nodes.is_multiple_of(256)
-            && (self.deadline.is_some_and(|d| Instant::now() >= d)
-                || self.cancel.is_some_and(|c| c.load(Ordering::Relaxed)))
-        {
-            self.out_of_time = true;
+        if self.nodes.is_multiple_of(256) {
+            let shared = self.shared;
+            if shared.stop.load(Ordering::Relaxed)
+                || shared.deadline.is_some_and(|d| Instant::now() >= d)
+                || shared.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+            {
+                shared.stop.store(true, Ordering::Relaxed);
+                self.out_of_time = true;
+            }
         }
         self.out_of_time
     }
@@ -307,7 +450,8 @@ impl Search<'_> {
         mover: &[Tile],
         other: &[Tile],
     ) -> Vec<Move> {
-        let mut moves = Solver::with_analysis(board, self.dict, analysis).find_moves_for(mover);
+        let mut moves =
+            Solver::with_analysis(board, self.shared.dict, analysis).find_moves_for(mover);
         let bonus = 2 * rack_value(board, other);
         moves.sort_by_cached_key(|m| {
             let out = m.tiles_used.len() == mover.len();
@@ -315,50 +459,6 @@ impl Search<'_> {
         });
         moves.push(Move::pass(mover));
         moves
-    }
-
-    /// Value and line of each root move at `depth`, best first, and whether
-    /// any line reached the depth limit. `None` if time ran out.
-    fn root(
-        &mut self,
-        board: &Board,
-        ours: &[Tile],
-        theirs: &[Tile],
-        scoreless: usize,
-        depth: usize,
-        order: Option<Vec<Move>>,
-    ) -> Option<(Vec<EndgameLine>, bool)> {
-        let mut lines = Vec::new();
-        let mut alpha = i32::MIN + 1;
-        let mut horizon = false;
-        let mut board = board.clone();
-        let analysis = Solver::new(&board, self.dict).analysis();
-        let moves = order.unwrap_or_else(|| self.ordered_moves(&board, &analysis, ours, theirs));
-        for mv in moves {
-            let (value, h) = self.child_value(
-                &analysis,
-                &mut board,
-                ours,
-                theirs,
-                scoreless,
-                &mv,
-                depth,
-                alpha,
-                i32::MAX,
-            )?;
-            // A move that does not beat the best so far was searched with
-            // a window that only proves it is no better.
-            let exact = value > alpha || lines.is_empty();
-            // A cut-off move's bound is only proof if it did not rest on
-            // the depth limit either, so any horizon makes the depth inexact.
-            horizon |= h;
-            if value > alpha {
-                alpha = value;
-            }
-            lines.push(EndgameLine { mv, value, exact });
-        }
-        lines.sort_by(|a, b| b.value.cmp(&a.value).then(b.exact.cmp(&a.exact)));
-        Some((lines, horizon))
     }
 
     /// The value of playing `mv` for the side holding `mover`, searched
@@ -426,7 +526,7 @@ impl Search<'_> {
     ) -> (i32, bool) {
         let theirs = rack_value(board, other);
         let pass = theirs - rack_value(board, mover);
-        let play = Solver::with_analysis(board, self.dict, analysis)
+        let play = Solver::with_analysis(board, self.shared.dict, analysis)
             .best_endgame_play(mover, theirs as u32)
             .map(|m| {
                 (
@@ -442,7 +542,7 @@ impl Search<'_> {
         // it proves the cut-off; otherwise the value is the best of
         // estimates at the limit.
         let proven = out && value >= beta;
-        self.table.insert(
+        self.shared.table.insert(
             key,
             Entry {
                 depth: 1,
@@ -484,7 +584,7 @@ impl Search<'_> {
             return Some((rack_diff, true));
         }
         let key = position_key(board, mover, other, scoreless);
-        if let Some(e) = self.table.get(&key).copied() {
+        if let Some(e) = self.shared.table.get(key) {
             if e.depth >= depth || !e.horizon {
                 match e.bound {
                     Bound::Exact => return Some((e.value, e.horizon)),
@@ -498,7 +598,7 @@ impl Search<'_> {
         let analysis = if placed.is_empty() {
             parent
         } else {
-            owned = parent.after_placing(board, self.dict, placed);
+            owned = parent.after_placing(board, self.shared.dict, placed);
             &owned
         };
         if depth == 1 {
@@ -513,8 +613,9 @@ impl Search<'_> {
         // The best move from an earlier visit first, before generating any
         // other: if it cuts off, the rest are never generated.
         let remembered = self
+            .shared
             .table
-            .get(&key)
+            .get(key)
             .and_then(|e| e.best)
             .and_then(|st| Some((st, st.rebuild(board, mover)?)));
         let mut tried = 0usize;
@@ -582,7 +683,7 @@ impl Search<'_> {
         } else {
             Bound::Exact
         };
-        self.table.insert(
+        self.shared.table.insert(
             key,
             Entry {
                 depth,
