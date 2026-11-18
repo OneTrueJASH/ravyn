@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="assets/banner.jpg" alt="RAVYN: Racing Arms by Value, Ȳ over n. A raven with wings of letter tiles above lines converging on Ȳ." width="100%">
+</p>
+
 # RAVYN
+
+**Pronunciation:** *RAY-vən* (/ˈreɪvən/), like "raven".
 
 **Racing Arms by Value: Ȳ over n**
 
