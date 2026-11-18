@@ -180,7 +180,12 @@ impl Dictionary {
     /// Load dictionary from a pre-compiled FST file
     pub fn load_from_fst<P: AsRef<Path>>(path: P) -> Result<Self> {
         let fst_bytes = std::fs::read(path.as_ref()).context("Failed to read FST file")?;
+        Self::from_fst_bytes(fst_bytes)
+    }
 
+    /// A dictionary from the bytes of an FST file (where there is no file
+    /// system, as in a browser).
+    pub fn from_fst_bytes(fst_bytes: Vec<u8>) -> Result<Self> {
         // Count words by iterating once
         let fst = Set::new(fst_bytes).context("Failed to parse FST data")?;
 
@@ -383,6 +388,20 @@ mod tests {
         // (an LFS pointer stub falls back to heuristic leaves).
         let klv_real = test_data::file(LEAVES).is_some();
         assert_eq!(dict.has_leave_table(), klv_real);
+    }
+
+    /// A word list read from bytes is the one read from its file.
+    #[test]
+    fn loads_from_bytes() {
+        let Some(path) = test_data::file(test_data::WORDS_FST) else {
+            return;
+        };
+        let from_file = super::Dictionary::load_from_fst(&path).unwrap();
+        let from_bytes = super::Dictionary::from_fst_bytes(std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(from_bytes.len(), from_file.len());
+        assert!(from_bytes.is_valid("QUIXOTIC"));
+        assert!(!from_bytes.is_valid("QXZJ"));
+        assert!(super::Dictionary::from_fst_bytes(vec![0, 1, 2]).is_err());
     }
 
     /// Leaves the Scrabble table cannot hold (three blanks) are valued on
