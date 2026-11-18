@@ -52,7 +52,7 @@ pub fn bingo_probability(leave: &[Tile]) -> f32 {
 /// Adjustment that converts a leave value fitted under a `fitted` bingo
 /// bonus to one worth `bingo_bonus`: the difference in bonus per unit of
 /// extra next-turn bingo probability relative to drawing seven fresh tiles
-/// (RefEngine's table, fitted at 50, loses 10 points per unit in Crossplay).
+/// (a table fitted at 50 loses 10 points per unit in Crossplay).
 /// First order only (the following turn's bingo chances are not adjusted).
 pub fn bingo_bonus_correction(leave: &[Tile], fitted: u32, bingo_bonus: u32) -> f32 {
     if fitted == bingo_bonus {

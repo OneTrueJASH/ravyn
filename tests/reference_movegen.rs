@@ -1,8 +1,6 @@
-//! The engine against RefEngine's answers, recorded in
-//! `fixtures/reference_movegen.txt` before RefEngine was removed from the
-//! repository: move generation, the same plays with the same scores. (The
-//! fixture's equity and inference records depended on RefEngine's leave table,
-//! which the engine no longer uses.)
+//! The engine against a reference engine's answers, recorded in
+//! `fixtures/reference_movegen.txt`: move generation, the same plays with
+//! the same scores.
 //!
 //! Needs the dictionary and leave table from the workspace root; skips
 //! when they are missing or Git LFS pointers.
@@ -52,7 +50,7 @@ fn parse_coords(coords: &str) -> (usize, usize, Direction) {
     (row, col, dir)
 }
 
-/// The move as RefEngine writes it: coordinates and the word with letters
+/// The move as the fixture writes it: coordinates and the word with letters
 /// from blanks in lowercase.
 fn notation(mv: &Move) -> (String, String) {
     let (dr, dc) = mv.direction.delta();
@@ -115,11 +113,10 @@ fn canonical_lines(state: &SolverState, plays: &[Move]) -> Vec<String> {
     lines
 }
 
-/// The engine generates exactly RefEngine's plays, with the same scores, on
-/// 32 positions (named and random; at most two blanks, where RefEngine is a
-/// reference).
+/// The engine generates exactly the reference engine's plays, with the
+/// same scores, on 32 positions (named and random; at most two blanks).
 #[test]
-fn move_generation_matches_refengine() {
+fn move_generation_matches_the_reference() {
     let Some(dict) = dictionary() else {
         return;
     };

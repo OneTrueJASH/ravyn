@@ -35,7 +35,7 @@ pub enum MoveKind {
 }
 
 /// Smallest bag that still permits an exchange (the universal word-game
-/// convention and RefEngine's default; see PRIMER.md).
+/// convention; see PRIMER.md).
 pub const EXCHANGE_MIN_BAG: usize = 7;
 
 /// Word shown for a pass.

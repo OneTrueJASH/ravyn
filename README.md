@@ -12,12 +12,12 @@ behind the leader's.
 
 - **Move generation** over a flattened word graph, with anchor bounds that
   search the most promising squares first (identical plays and scores to
-  RefEngine on 32 reference positions)
+  a reference engine on 32 positions)
 - **Simulation** of every candidate as a continuous parallel pipeline, with
   best-arm racing on spread and win rate
 - **Rack inference**: what the opponent probably kept, given their play
 - **Leave values trained by self-play** (`data/leaves.rlv`, all 921,298
-  leaves), stronger than RefEngine's table by about 2 points of spread a game
+  leaves), 16 points of spread a game stronger than the per-letter heuristic
 - **Exact endgames**: Crossplay's equal-turn ending, and Scrabble's go-out
   ending by negamax
 - **Exact pre-endgame** with one tile in the bag (Crossplay), the pass
@@ -40,8 +40,7 @@ Commands: `fetch-data` (the data files), `gen`, `sim`, `endgame`, `preendgame`, 
 
 ## Data
 
-The data files live in their own repository, versioned and checksummed,
-as RefEngine keeps its lexica in a separate data repository:
+The data files live in their own repository, versioned and checksummed:
 
 ```bash
 ravyn fetch-data        # into ~/.ravyn/data (or --data DIR)

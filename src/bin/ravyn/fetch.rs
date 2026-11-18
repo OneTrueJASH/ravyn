@@ -1,5 +1,5 @@
 //! `ravyn fetch-data`: download the data files (the word list and leave
-//! values) into a data directory, as RefEngine fetches a separate data repository. They live
+//! values) into a data directory, kept apart from the code. They live
 //! in their own repository, not in the engine's source or crate.
 //!
 //! Each data version is a directory `v<YYYYMMDD>/` holding the files. Their
