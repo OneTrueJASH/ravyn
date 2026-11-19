@@ -8,7 +8,7 @@
 
 **Racing Arms by Value: Ȳ over n**
 
-A crossword-game analysis engine in Rust, built for NYT Crossplay and also
+A crossword-game analysis engine in Rust, built for Crossplay and also
 playing standard Scrabble. RAVYN generates every legal play, values each by
 score and leave, then races the candidates as bandit arms: each playout
 samples an outcome *Y*, and arms are dropped once their mean Ȳₙ is clearly
@@ -52,9 +52,9 @@ The data files live in their own repository, versioned and checksummed:
 ravyn fetch-data        # into ~/.ravyn/data (or --data DIR)
 ```
 
-It installs only files that match the published SHA-256 checksums. While
-the data repository is private it needs a token (`$RAVYN_DATA_TOKEN`,
-`$GITHUB_TOKEN`, or a `gh auth login`). The CLI looks for `data/` in
+It installs only files that match the published SHA-256 checksums. No
+account or token is needed; for a private copy of the data repository,
+`$RAVYN_DATA_TOKEN`, `$GITHUB_TOKEN` or a `gh auth login` supplies one. The CLI looks for `data/` in
 `--data`, `$RAVYN_DATA`, the current directory, then `~/.ravyn`; tests and
 benchmarks use `data/` beside the crate when present. The crate package
 leaves out the word list; `data/leaves.rlv`, RAVYN's own trained leave
@@ -70,9 +70,11 @@ cargo bench --bench engine
 ```
 
 RAVYN is developed inside [RAVYL](https://github.com/OneTrueJASH/ravyl)
-(`crates/ravyn`), its first user, and synced here; until this repository is
-public, changes are made there.
+(`crates/ravyn`), its first user, and synced here. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
 [MIT](LICENSE)
+
+RAVYN is an independent project, not affiliated with Crossplay or Scrabble.

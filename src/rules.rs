@@ -126,7 +126,7 @@ const fn mark(
     layout
 }
 
-/// NYT Crossplay's premium squares. The centre star scores as a plain
+/// Crossplay's premium squares. The centre star scores as a plain
 /// square.
 const fn crossplay_layout() -> [[Premium; BOARD_SIZE]; BOARD_SIZE] {
     let layout = [[Premium::Normal; BOARD_SIZE]; BOARD_SIZE];
@@ -213,7 +213,7 @@ const fn crossplay_layout() -> [[Premium; BOARD_SIZE]; BOARD_SIZE] {
     )
 }
 
-/// NYT Crossplay.
+/// Crossplay.
 #[rustfmt::skip] // keep the letter rulers lined up with the values
 pub static CROSSPLAY: Rules = Rules {
     name: "Crossplay",

@@ -8,8 +8,11 @@
 //! made with, whoever controls the source; each file is written to a
 //! temporary name and renamed into place. Downloads go through `curl` (on
 //! macOS, Linux and Windows 10 and later), keeping the engine free of an
-//! HTTP stack; a token is handed to it on its standard input, never on its
-//! command line, where other programs could read it.
+//! HTTP stack. Each file is first fetched from the public repository with
+//! no credentials; only if that fails is a token looked up and the GitHub
+//! API tried, the token handed to curl on its standard input, never on its
+//! command line, where other programs could read it. A token is only ever
+//! sent to the GitHub API, never to a `$RAVYN_DATA_URL` source.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,9 +21,13 @@ use std::process::{Command, Stdio};
 /// The data version this build of the engine uses.
 pub const DATA_VERSION: &str = "20261118";
 
-/// Where the data is fetched from: the GitHub contents API of the data
-/// repository (`$RAVYN_DATA_URL` overrides it).
-const DEFAULT_SOURCE: &str = "https://api.github.com/repos/OneTrueJASH/ravyn-data/contents";
+/// Where the data is fetched from: the public data repository's raw files
+/// (`$RAVYN_DATA_URL` overrides it).
+const PUBLIC_SOURCE: &str = "https://raw.githubusercontent.com/OneTrueJASH/ravyn-data/main";
+
+/// The fallback when the public files cannot be reached: the GitHub
+/// contents API, with a token, for a private data repository.
+const API_SOURCE: &str = "https://api.github.com/repos/OneTrueJASH/ravyn-data/contents";
 
 /// The files of the data version, installed under `<root>/data/`, with
 /// their SHA-256 checksums.
@@ -46,7 +53,7 @@ pub fn default_root() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".ravyn"))
 }
 
-/// A token for the data repository while it is private: `$RAVYN_DATA_TOKEN`,
+/// A token for the data repository when it is private: `$RAVYN_DATA_TOKEN`,
 /// `$GITHUB_TOKEN`, or the GitHub CLI's login (`gh auth token`).
 fn token() -> Option<String> {
     for var in ["RAVYN_DATA_TOKEN", "GITHUB_TOKEN"] {
@@ -94,22 +101,43 @@ fn download(source: &str, token: Option<&str>, name: &str, to: &Path) -> Result<
     let out = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
         let why = String::from_utf8_lossy(&out.stderr);
-        let hint = if why.contains("404") || why.contains("401") || why.contains("403") {
-            "; the data repository is private: set $RAVYN_DATA_TOKEN (or $GITHUB_TOKEN), \
-             or log in with `gh auth login`"
-        } else {
-            ""
-        };
-        return Err(format!("{url}: {}{hint}", why.trim()));
+        return Err(format!("{url}: {}", why.trim()));
     }
     Ok(())
+}
+
+/// Download `name` into `to`: from `$RAVYN_DATA_URL` if it is set, with no
+/// token; otherwise from the public files, then, if that fails and a token
+/// can be found, from the GitHub API with it. `token` caches the lookup.
+fn download_any(
+    custom: Option<&str>,
+    token: &mut Option<Option<String>>,
+    name: &str,
+    to: &Path,
+) -> Result<(), String> {
+    if let Some(source) = custom {
+        return download(source, None, name, to);
+    }
+    let public = match download(PUBLIC_SOURCE, None, name, to) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    match token.get_or_insert_with(self::token) {
+        Some(t) => download(API_SOURCE, Some(t), name, to).map_err(|e| format!("{public}\n{e}")),
+        None => Err(format!(
+            "{public}\nif the data repository is private, set $RAVYN_DATA_TOKEN \
+             (or $GITHUB_TOKEN), or log in with `gh auth login`"
+        )),
+    }
 }
 
 /// Fetch the data version into `<root>/data/`, verifying every file
 /// against the checksum built into this program.
 pub fn fetch(root: &Path) -> Result<(), String> {
-    let source = std::env::var("RAVYN_DATA_URL").unwrap_or_else(|_| DEFAULT_SOURCE.to_string());
-    let token = token();
+    let custom = std::env::var("RAVYN_DATA_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty());
+    let mut token = None;
     let dir = root.join("data");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for (name, want) in FILES {
@@ -119,7 +147,7 @@ pub fn fetch(root: &Path) -> Result<(), String> {
             continue;
         }
         let temp = dir.join(format!(".{name}.download"));
-        let fetched = download(&source, token.as_deref(), name, &temp).and_then(|()| {
+        let fetched = download_any(custom.as_deref(), &mut token, name, &temp).and_then(|()| {
             let bytes = std::fs::read(&temp).map_err(|e| e.to_string())?;
             let got = sha256_hex(&bytes);
             if got == want {
@@ -221,6 +249,25 @@ mod tests {
         // Nothing that could break out of the quoted header.
         assert!(curl_config(Some("a\"b")).is_err());
         assert!(curl_config(Some("a\nheader = x")).is_err());
+    }
+
+    #[test]
+    fn a_custom_source_never_gets_a_token() {
+        // A source that cannot answer: the error must come from it alone,
+        // without a token lookup or a fallback to the GitHub API.
+        let dir = std::env::temp_dir().join(format!("ravyn-fetch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut token = None;
+        let err = download_any(
+            Some("http://127.0.0.1:9"),
+            &mut token,
+            "words.fst",
+            &dir.join("x"),
+        )
+        .unwrap_err();
+        assert!(token.is_none(), "no token is looked up for a custom source");
+        assert!(!err.contains("api.github.com"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

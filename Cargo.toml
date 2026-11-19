@@ -1,19 +1,19 @@
 [package]
 name = "ravyn"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 description = "RAVYN (Racing Arms by Value: Ȳ over n): a crossword-game analysis engine"
 license = "MIT"
 repository = "https://github.com/OneTrueJASH/ravyn"
+documentation = "https://docs.rs/ravyn"
 keywords = ["crossword", "word-game", "scrabble", "monte-carlo", "engine"]
 categories = ["games", "algorithms"]
 rust-version = "1.88"
-publish = false
 readme = "README.md"
 # The word list is not part of the package: it is fetched from the data
 # repository (`ravyn fetch-data`), kept apart from the code. The leave
 # values, RAVYN's own, ship with it.
-exclude = ["data/words.fst", "data/crossplay-removed.txt", "/wasm", "/fuzz", "/assets"]
+exclude = ["data/words.fst", "data/crossplay-removed.txt", "/wasm", "/fuzz", "/assets", "/.github"]
 
 [dependencies]
 anyhow = "1.0"
