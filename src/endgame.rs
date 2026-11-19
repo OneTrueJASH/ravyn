@@ -79,7 +79,7 @@ pub struct PvMove {
 /// Result of endgame evaluation for a single candidate move
 #[derive(Debug, Clone)]
 pub struct EndgameMove {
-    /// The move itself (a pass has `tiles_used` empty and word [`PASS_WORD`])
+    /// The move itself (a pass has `tiles_used` empty and word [`PASS_WORD`](crate::solver::PASS_WORD))
     pub mv: Move,
     /// Net scoring advantage: our_score - opponent_best_response_score.
     /// For last-move (no opponent response), this equals the move score.

@@ -372,8 +372,8 @@ impl MctsEvaluator {
     /// Evaluate the top candidates and return results sorted by equity.
     ///
     /// Playouts run in rounds; after each round, candidates that trail the
-    /// leader by more than [`PRUNE_MARGIN`] points, by at least
-    /// [`PRUNE_SIGMAS`] standard errors of the paired difference, stop and
+    /// leader by more than 4 points, by at least
+    /// 2.5 standard errors of the paired difference, stop and
     /// keep their estimate so far. The budget concentrates on the moves that
     /// can still finish first. Results list the fully simulated candidates
     /// first (by expected spread), then the pruned ones, so a stale

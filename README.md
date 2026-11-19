@@ -4,6 +4,9 @@
 
 # RAVYN
 
+[![crates.io](https://img.shields.io/crates/v/ravyn.svg)](https://crates.io/crates/ravyn)
+[![docs.rs](https://img.shields.io/docsrs/ravyn)](https://docs.rs/ravyn)
+
 **Pronunciation:** *RAY-vən* (/ˈreɪvən/), like "raven".
 
 **Racing Arms by Value: Ȳ over n**
@@ -13,6 +16,19 @@ playing standard Scrabble. RAVYN generates every legal play, values each by
 score and leave, then races the candidates as bandit arms: each playout
 samples an outcome *Y*, and arms are dropped once their mean Ȳₙ is clearly
 behind the leader's.
+
+## Install
+
+With Rust 1.88 or newer:
+
+```bash
+cargo install ravyn   # the command-line tool
+ravyn fetch-data      # the word list and leave values, into ~/.ravyn/data
+```
+
+As a library: `cargo add ravyn`, with the API documented on
+[docs.rs](https://docs.rs/ravyn). The terminal app built on it is
+[RAVYL](https://github.com/OneTrueJASH/ravyl).
 
 ## What it does
 
@@ -36,9 +52,11 @@ behind the leader's.
 ## Command line
 
 ```bash
-cargo run --release --bin ravyn -- gen '15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 AEINRST/ 0/0 0'
-cargo run --release --bin ravyn -- --help
+ravyn gen '15/15/15/15/15/15/15/15/15/15/15/15/15/15/15 AEINRST/ 0/0 0'
+ravyn --help
 ```
+
+From a checkout, `cargo run --release --bin ravyn --` stands in for `ravyn`.
 
 Commands: `fetch-data` (the data files), `gen`, `sim`, `endgame`, `preendgame`, `infer` (on CGP positions),
 `gcg` (review a game record, or print one of its positions with `--at N`),

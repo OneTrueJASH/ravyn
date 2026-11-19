@@ -52,7 +52,7 @@ pub struct TracePoint {
     pub bag: usize,
     pub was_bingo: bool,
     /// Phase-scaled leave value of our rack minus the opponent's, as the
-    /// cut-off valuation in [`Playout::run`] would add it.
+    /// playout's cut-off valuation would add it.
     pub leave_adj: f32,
 }
 

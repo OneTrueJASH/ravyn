@@ -529,7 +529,7 @@ impl<'a> Simulation<'a> {
     /// snapshot (with `done` set).
     ///
     /// Jobs run on the rayon pool as a continuous pipeline: about
-    /// [`JOBS_PER_THREAD`] per thread are kept in flight, and each result
+    /// four per thread are kept in flight, and each result
     /// is applied as it arrives and replaced by a new job, so no thread
     /// waits for the slowest job of a round. Results are applied in
     /// iteration order per arm (a job that finishes early waits for the

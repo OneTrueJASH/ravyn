@@ -32,8 +32,8 @@ const BINGO_MODEL_WEIGHTS: [f32; 27] = [
     -1.018, -1.423, 1.831,
 ];
 
-/// Probability of a bingo next turn for a rack keeping `leave` (see
-/// [`BINGO_MODEL_WEIGHTS`]).
+/// Probability of a bingo next turn for a rack keeping `leave`: a logistic
+/// model in the leave's letter counts, fitted to self-play.
 pub fn bingo_probability(leave: &[Tile]) -> f32 {
     let mut z = BINGO_MODEL_BIAS;
     for t in leave {
