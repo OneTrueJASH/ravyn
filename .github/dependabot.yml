@@ -1,3 +1,7 @@
+# Patch updates arrive together in one pull request. Every other Rust
+# update gets its own: Dependabot calls 0.7 -> 0.8 "minor", but for a 0.x
+# crate that is a breaking change, so it must be reviewed alone. GitHub
+# Actions follow ordinary semver, so their minor and patch updates group.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -5,8 +9,9 @@ updates:
     schedule:
       interval: weekly
     groups:
-      cargo:
+      cargo-patch:
         patterns: ["*"]
+        update-types: ["patch"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -14,3 +19,4 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
