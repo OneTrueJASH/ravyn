@@ -70,7 +70,9 @@ The data files live in their own repository, versioned and checksummed:
 ravyn fetch-data        # into ~/.ravyn/data (or --data DIR)
 ```
 
-It installs only files that match the published SHA-256 checksums. No
+It installs only files that match the published SHA-256 checksums;
+programs built on the library can call `ravyn::fetch::fetch` instead
+(RAVYL's `ravyl --fetch-data` does). No
 account or token is needed; for a private copy of the data repository,
 `$RAVYN_DATA_TOKEN`, `$GITHUB_TOKEN` or a `gh auth login` supplies one. The CLI looks for `data/` in
 `--data`, `$RAVYN_DATA`, the current directory, then `~/.ravyn`; tests and

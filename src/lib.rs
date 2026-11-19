@@ -17,6 +17,7 @@
 pub mod board;
 pub mod dictionary;
 pub mod endgame;
+pub mod fetch;
 pub mod game;
 pub mod gcg;
 pub mod inference;

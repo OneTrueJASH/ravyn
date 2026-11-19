@@ -1,9 +1,10 @@
-//! `ravyn fetch-data`: download the data files (the word list and leave
-//! values) into a data directory, kept apart from the code. They live
-//! in their own repository, not in the engine's source or crate.
+//! Download the data files (the word list and leave values) into a data
+//! directory, kept apart from the code: `ravyn fetch-data` and
+//! `ravyl --fetch-data` both call [`fetch`]. The files live in their own
+//! repository, not in the engine's source or crate.
 //!
 //! Each data version is a directory `v<YYYYMMDD>/` holding the files. Their
-//! SHA-256 checksums are built into this program ([`FILES`]), so nothing is
+//! SHA-256 checksums are built into the engine ([`FILES`]), so nothing is
 //! installed unless it is exactly the file this version of the engine was
 //! made with, whoever controls the source; each file is written to a
 //! temporary name and renamed into place. Downloads go through `curl` (on
@@ -132,7 +133,8 @@ fn download_any(
 }
 
 /// Fetch the data version into `<root>/data/`, verifying every file
-/// against the checksum built into this program.
+/// against the checksum built into the engine. Progress is printed to
+/// standard output; files already up to date are left alone.
 pub fn fetch(root: &Path) -> Result<(), String> {
     let custom = std::env::var("RAVYN_DATA_URL")
         .ok()

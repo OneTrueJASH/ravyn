@@ -5,8 +5,6 @@
 //! lowercase letters for blanks; the rack with `?` for a blank, optionally
 //! followed by the opponent's rack when it is known; then the scores.
 
-mod fetch;
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
@@ -14,6 +12,7 @@ use std::time::Duration;
 
 use ravyn::dictionary::Dictionary;
 use ravyn::endgame::{EndgameSolver, FinalTurn};
+use ravyn::fetch;
 use ravyn::game::SolverState;
 use ravyn::gcg::{self, Action, Game};
 use ravyn::inference::{infer_leave, InferenceSettings};
