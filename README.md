@@ -22,9 +22,12 @@ behind the leader's.
 With Rust 1.88 or newer:
 
 ```bash
-cargo install ravyn   # the command-line tool
-ravyn fetch-data      # the word list and leave values, into ~/.ravyn/data
+cargo install ravyn ravyl   # the command-line tool and the terminal app
+ravyn fetch-data            # the word list and leave values, into ~/.ravyn/data
 ```
+
+Both commands land in `~/.cargo/bin`, which the Rust installer puts on
+your `PATH`, so `ravyn` and `ravyl` run from any directory.
 
 As a library: `cargo add ravyn`, with the API documented on
 [docs.rs](https://docs.rs/ravyn). The terminal app built on it is
